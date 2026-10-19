@@ -126,7 +126,15 @@ impl TileLayer {
     }
 
     /// 在给定画布上铺底图，返回是否有任何瓦片已绘制。
-    pub fn draw(&mut self, ui: &mut egui::Ui, map: &MapState, rect: Rect) -> bool {
+    ///
+    /// `clip` 用于「只看校园」模式：底图被裁剪到校园范围，范围外不铺图。
+    pub fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+        map: &MapState,
+        rect: Rect,
+        clip: Option<Rect>,
+    ) -> bool {
         if !self.enabled {
             return false;
         }
@@ -138,6 +146,10 @@ impl TileLayer {
         }
         self.zoom = visible[0].0.z;
         let painter = ui.painter_at(rect);
+        let painter = match clip {
+            Some(c) if c.width() > 1.0 && c.height() > 1.0 => painter.with_clip_rect(c),
+            _ => painter,
+        };
         let mut painted = false;
         for (key, tile_rect) in visible {
             match self.tiles.get(&key) {

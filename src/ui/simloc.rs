@@ -22,6 +22,8 @@ use eframe::egui;
 const MAP_HEIGHT: f32 = 240.0;
 /// 画路线用的画布更高，方便画复杂线路。
 const DRAW_HEIGHT: f32 = 420.0;
+/// 校园范围在打卡点外接框外再留多少米。
+const CAMPUS_MARGIN_M: f64 = 150.0;
 
 /// 地图区在干什么。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -62,6 +64,9 @@ pub struct SimLocPage {
     /// 画线视图（与取点视图分开，各自保持缩放）。
     pub route_map: MapState,
     pub route_map_ready: bool,
+    /// 上次按校园范围适配时的画布尺寸（尺寸变化要重新适配，首帧布局往往还没稳定）。
+    pub route_fit_size: Option<egui::Vec2>,
+    pub pick_fit_size: Option<egui::Vec2>,
     /// 正在拖动的顶点下标。
     pub drag_vertex: Option<usize>,
     /// 画线区的临时提示。
@@ -69,6 +74,10 @@ pub struct SimLocPage {
     /// 在线底图。
     pub tiles: crate::ui::tiles::TileLayer,
     pub tiles_ready: bool,
+    /// 校园范围 `[min_lat, min_lon, max_lat, max_lon]`（BD-09），地图只显示这一块。
+    pub campus: Option<[f64; 4]>,
+    /// 是否锁定在校园范围内（配置项，界面可切）。
+    pub campus_lock: bool,
 }
 
 impl SimLocPage {
@@ -83,7 +92,26 @@ impl SimLocPage {
             &cfg.tile_url,
             crate::location::Datum::parse(&cfg.tile_datum).unwrap_or(Datum::Wgs84),
         );
+        page.campus = cfg.campus_bbox;
+        page.campus_lock = cfg.campus_lock;
         page
+    }
+
+    /// 按已缓存打卡点重算校园范围（外扩 150 m），没有缓存时退回用模拟位置附近。
+    pub fn recompute_campus(&mut self, margin_m: f64) -> bool {
+        let mut pts = self.points.clone();
+        if pts.is_empty() {
+            if let Some(p) = self.bd() {
+                pts.push(p);
+            }
+        }
+        match crate::location::bbox_from_points(&pts, margin_m) {
+            Some(bbox) => {
+                self.campus = Some(bbox);
+                true
+            }
+            None => false,
+        }
     }
 
     /// 把一份已保存的模拟位置灌进界面缓冲区。
@@ -382,8 +410,82 @@ impl App {
             if let Some(note) = page.tiles.note.clone() {
                 ui.colored_label(theme::warn(), format!("底图异常：{note}"));
             }
-            if changed {
-                if let Some(i) = chosen {
+        // ── 校园范围（只显示学校这一块）──────────────────────────
+        if page.campus.is_none() && !page.points.is_empty() {
+            if page.recompute_campus(CAMPUS_MARGIN_M) {
+                self.config.campus_bbox = page.campus;
+                let _ = crate::api::model::save_config(&self.config);
+            }
+        }
+        let mut recenter = false;
+        let mut recompute = false;
+        let mut set_to_campus = false;
+        mobile::row(ui, |ui| {
+            ui.label("校园范围：");
+            let mut lock = page.campus_lock;
+            if ui.checkbox(&mut lock, "只看校园").changed() {
+                page.campus_lock = lock;
+                self.config.campus_lock = lock;
+                let _ = crate::api::model::save_config(&self.config);
+                page.map_ready = false;
+                page.route_map_ready = false;
+                page.route_fit_size = None;
+                page.pick_fit_size = None;
+            }
+            match page.campus {
+                Some(b) => {
+                    let (w, h) = crate::location::bbox_size_m(b);
+                    ui.colored_label(theme::text_dim(), format!("{w:.0}×{h:.0} m"));
+                }
+                None => {
+                    ui.colored_label(theme::text_dim(), "未设置");
+                }
+            }
+            if ui.button("定位到校园").clicked() {
+                recenter = true;
+            }
+            if ui.small_button("按打卡点重算").clicked() {
+                recompute = true;
+            }
+            if ui.small_button("位置设到校园中心").clicked() {
+                set_to_campus = true;
+            }
+        });
+        if recenter {
+            page.map_ready = false;
+            page.route_map_ready = false;
+        }
+        if set_to_campus {
+            match page.campus {
+                Some(b) => {
+                    let (lat, lon) = crate::location::bbox_center(b);
+                    let (d_lat, d_lon) = location::from_bd09(lat, lon, page.datum);
+                    page.set_point(d_lat, d_lon);
+                    page.map_ready = false;
+                    page.flash(
+                        format!(
+                            "已填入校园中心 {d_lat:.6},{d_lon:.6}（{}），记得「应用并保存」",
+                            page.datum.label()
+                        ),
+                        false,
+                    );
+                }
+                None => page.flash("还没有校园范围，先点「按打卡点重算」", true),
+            }
+        }
+        if recompute {
+            if page.recompute_campus(CAMPUS_MARGIN_M) {
+                self.config.campus_bbox = page.campus;
+                let _ = crate::api::model::save_config(&self.config);
+                page.map_ready = false;
+                page.route_map_ready = false;
+                page.flash("已按打卡点重算校园范围", false);
+            } else {
+                page.flash("没有打卡点缓存，先点「重新读取点位」", true);
+            }
+        }
+        if changed {
+            if let Some(i) = chosen {
                     let (_, url, datum) = crate::ui::tiles::PRESETS[i];
                     page.tiles.url_template = url.to_string();
                     page.tiles.datum = datum;
@@ -685,12 +787,22 @@ impl App {
             egui::Color32::from_rgb(250, 252, 251),
         );
 
-        if !page.map_ready {
+        let size_changed = page.pick_fit_size != Some(canvas.size());
+        let need_fit =
+            !page.map_ready || (page.campus_lock && page.campus.is_some() && size_changed);
+        if need_fit {
             let mut bounds = page.points.clone();
             if let Some(p) = pin {
                 bounds.push(p);
             }
-            if bounds.len() >= 2 {
+            let locked = page
+                .campus
+                .filter(|_| page.campus_lock)
+                .map(|b| page.map.fit_bounds(canvas, b))
+                .unwrap_or(false);
+            if locked {
+                // 已按校园范围适配
+            } else if bounds.len() >= 2 {
                 page.map.fit(canvas, &bounds);
             } else {
                 let (lat, lon) =
@@ -700,10 +812,12 @@ impl App {
                 page.map.offset = egui::Vec2::ZERO;
             }
             page.map_ready = true;
+            page.pick_fit_size = Some(canvas.size());
         }
 
-        // 底图先铺，矢量层盖在上面
-        page.tiles.draw(ui, &page.map, canvas);
+        // 底图先铺，矢量层盖在上面；锁定校园时只铺校园框内
+        let clip = campus_screen_rect(page.campus, page.campus_lock, &page.map, canvas);
+        page.tiles.draw(ui, &page.map, canvas, clip);
 
         let checkpoint = egui::Color32::from_rgb(240, 180, 0);
         for &(lat, lon) in &page.points {
@@ -757,6 +871,10 @@ impl App {
             );
         }
         page.map.interact(ui, canvas);
+        if let (true, Some(b)) = (page.campus_lock, page.campus) {
+            page.map.clamp_to_bounds(canvas, b);
+        }
+        draw_campus_outline(&painter, canvas, &page.map, page.campus, page.campus_lock);
     }
 
     /// 画线画布：在线底图 + 打卡点 + 手绘折线（加/拖/删顶点、缩放、比例尺）。
@@ -773,10 +891,20 @@ impl App {
         );
 
         // 首次进入：视野对准打卡点与已画路线
-        if !page.route_map_ready {
+        let size_changed = page.route_fit_size != Some(canvas.size());
+        let need_fit = !page.route_map_ready
+            || (page.campus_lock && page.campus.is_some() && size_changed);
+        if need_fit {
             let mut bounds = page.points.clone();
             bounds.extend(page.route.points.iter().copied());
-            if bounds.len() >= 2 {
+            let locked = page
+                .campus
+                .filter(|_| page.campus_lock)
+                .map(|b| page.route_map.fit_bounds(canvas, b))
+                .unwrap_or(false);
+            if locked {
+                // 已按校园范围适配
+            } else if bounds.len() >= 2 {
                 page.route_map.fit(canvas, &bounds);
             } else {
                 let (lat, lon) = page
@@ -787,10 +915,12 @@ impl App {
                 page.route_map.offset = egui::Vec2::ZERO;
             }
             page.route_map_ready = true;
+            page.route_fit_size = Some(canvas.size());
         }
 
         // ① 底图
-        let painted = page.tiles.draw(ui, &page.route_map, canvas);
+        let clip = campus_screen_rect(page.campus, page.campus_lock, &page.route_map, canvas);
+        let painted = page.tiles.draw(ui, &page.route_map, canvas, clip);
         if page.tiles.enabled && !painted {
             let (loaded, inflight, _) = page.tiles.stats();
             let msg = if loaded == 0 && inflight > 0 {
@@ -892,6 +1022,9 @@ impl App {
             page.route_map.scale = (page.route_map.scale * factor).clamp(0.01, 60.0);
             let after = page.route_map.to_screen(canvas, before.0, before.1);
             page.route_map.offset += anchor - after;
+            if let (true, Some(b)) = (page.campus_lock, page.campus) {
+                page.route_map.clamp_to_bounds(canvas, b);
+            }
         }
 
         let pointer = response.interact_pointer_pos();
@@ -914,6 +1047,17 @@ impl App {
         if response.drag_stopped() {
             page.drag_vertex = None;
         }
+
+        if let (true, Some(b)) = (page.campus_lock, page.campus) {
+            page.route_map.clamp_to_bounds(canvas, b);
+        }
+        draw_campus_outline(
+            &painter,
+            canvas,
+            &page.route_map,
+            page.campus,
+            page.campus_lock,
+        );
 
         // 左键单击空白处 = 追加拐点
         if response.clicked() {
@@ -1123,6 +1267,56 @@ impl App {
             }
         }
     }
+}
+
+/// 锁定校园时，底图只铺在这个屏幕矩形里（校园框 ∩ 画布）。
+fn campus_screen_rect(
+    campus: Option<[f64; 4]>,
+    locked: bool,
+    map: &MapState,
+    canvas: egui::Rect,
+) -> Option<egui::Rect> {
+    if !locked {
+        return None;
+    }
+    let b = campus?;
+    let p0 = map.to_screen(canvas, b[0], b[1]);
+    let p1 = map.to_screen(canvas, b[2], b[3]);
+    let r = egui::Rect::from_min_max(
+        egui::pos2(p0.x.min(p1.x), p0.y.min(p1.y)),
+        egui::pos2(p0.x.max(p1.x), p0.y.max(p1.y)),
+    );
+    Some(r.intersect(canvas))
+}
+
+/// 画出校园范围外框（锁定时常显，未锁定时淡显）。
+fn draw_campus_outline(
+    painter: &egui::Painter,
+    canvas: egui::Rect,
+    map: &MapState,
+    campus: Option<[f64; 4]>,
+    locked: bool,
+) {
+    let Some(b) = campus else { return };
+    let p0 = map.to_screen(canvas, b[0], b[1]);
+    let p1 = map.to_screen(canvas, b[2], b[3]);
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(p0.x.min(p1.x), p0.y.min(p1.y)),
+        egui::pos2(p0.x.max(p1.x), p0.y.max(p1.y)),
+    );
+    let color = if locked {
+        egui::Color32::from_rgb(13, 148, 136)
+    } else {
+        egui::Color32::from_rgb(170, 185, 180)
+    };
+    painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.5_f32, color));
+    painter.text(
+        egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
+        egui::Align2::LEFT_TOP,
+        "校园范围",
+        egui::FontId::proportional(10.0),
+        color,
+    );
 }
 
 /// 屏幕距离最近且在 12 px 内的顶点。

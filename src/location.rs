@@ -286,6 +286,55 @@ impl SimLocation {
     }
 }
 
+/// 由一组 BD-09 点算外接矩形，向外扩 `margin_m` 米，返回 `[min_lat, min_lon, max_lat, max_lon]`。
+///
+/// 用来把地图视野锁定在学校范围（打卡点云 + 余量）内。
+pub fn bbox_from_points(points: &[(f64, f64)], margin_m: f64) -> Option<[f64; 4]> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut min_lat = f64::INFINITY;
+    let mut max_lat = f64::NEG_INFINITY;
+    let mut min_lon = f64::INFINITY;
+    let mut max_lon = f64::NEG_INFINITY;
+    for &(lat, lon) in points {
+        if !lat.is_finite() || !lon.is_finite() {
+            continue;
+        }
+        min_lat = min_lat.min(lat);
+        max_lat = max_lat.max(lat);
+        min_lon = min_lon.min(lon);
+        max_lon = max_lon.max(lon);
+    }
+    if !min_lat.is_finite() || !min_lon.is_finite() {
+        return None;
+    }
+    let d_lat = margin_m / crate::track::geom::MET_PER_DEG_LAT;
+    let d_lon = margin_m / crate::track::geom::MET_PER_DEG_LNG;
+    Some([
+        min_lat - d_lat,
+        min_lon - d_lon,
+        max_lat + d_lat,
+        max_lon + d_lon,
+    ])
+}
+
+/// 矩形的中心点（BD-09）。
+pub fn bbox_center(bbox: [f64; 4]) -> (f64, f64) {
+    (
+        (bbox[0] + bbox[2]) / 2.0,
+        (bbox[1] + bbox[3]) / 2.0,
+    )
+}
+
+/// 矩形的边长（米，东西 × 南北）。
+pub fn bbox_size_m(bbox: [f64; 4]) -> (f64, f64) {
+    (
+        (bbox[3] - bbox[1]) * crate::track::geom::MET_PER_DEG_LNG,
+        (bbox[2] - bbox[0]) * crate::track::geom::MET_PER_DEG_LAT,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,8 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_prefers_label_then_city() {
-        let mut sim = SimLocation::new(38.9, 121.5, Datum::Bd09).unwrap();
+    fn summary_prefers_label_then_city() {        let mut sim = SimLocation::new(38.9, 121.5, Datum::Bd09).unwrap();
         assert!(sim.summary().starts_with("模拟位置"));
         sim.city = "大连市".into();
         assert!(sim.summary().starts_with("大连市"));
@@ -425,5 +473,25 @@ mod tests {
         assert_eq!(sim.city_or("某某市"), "大连市");
         sim.city = "   ".into();
         assert_eq!(sim.city_or("某某市"), "某某市");
+    }
+
+    /// 校园外接框：覆盖所有点，并按米数外扩。
+    #[test]
+    fn bbox_covers_points_with_margin() {
+        let pts = vec![(28.267307, 113.063832), (28.267967, 113.065512)];
+        let bbox = bbox_from_points(&pts, 150.0).expect("bbox");
+        assert!(bbox[0] < 28.267307);
+        assert!(bbox[2] > 28.267967);
+        assert!(bbox[1] < 113.063832);
+        assert!(bbox[3] > 113.065512);
+        // 外扩 150 m 后高度约 73 m + 300 m，宽度约 145 m + 300 m
+        let (w, h) = bbox_size_m(bbox);
+        assert!((h - 373.0).abs() < 5.0, "h={h}");
+        assert!((w - 445.0).abs() < 5.0, "w={w}");
+        // 中心在两点之间
+        let (lat, lon) = bbox_center(bbox);
+        assert!(lat > 28.2673 && lat < 28.2680, "lat={lat}");
+        assert!(lon > 113.0638 && lon < 113.0656, "lon={lon}");
+        assert!(bbox_from_points(&[], 10.0).is_none());
     }
 }

@@ -538,14 +538,36 @@ impl App {
         if !self.run_page.map_fitted {
             let mut bounds = route.points.clone();
             bounds.extend(cps.iter().copied());
-            if bounds.len() >= 2 {
+            // 锁定校园范围时优先按校服 bbox 适配，和模拟位置页保持一致
+            let locked = self
+                .config
+                .campus_bbox
+                .filter(|_| self.config.campus_lock)
+                .map(|b| self.run_page.map.fit_bounds(canvas, b))
+                .unwrap_or(false);
+            if !locked && bounds.len() >= 2 {
                 self.run_page.map.fit(canvas, &bounds);
             }
             self.run_page.map_fitted = true;
         }
+        let clip = self
+            .config
+            .campus_bbox
+            .filter(|_| self.config.campus_lock)
+            .and_then(|b| {
+                let p0 = self.run_page.map.to_screen(canvas, b[0], b[1]);
+                let p1 = self.run_page.map.to_screen(canvas, b[2], b[3]);
+                Some(
+                    egui::Rect::from_min_max(
+                        egui::pos2(p0.x.min(p1.x), p0.y.min(p1.y)),
+                        egui::pos2(p0.x.max(p1.x), p0.y.max(p1.y)),
+                    )
+                    .intersect(canvas),
+                )
+            });
         self.sim_loc_page
             .tiles
-            .draw(ui, &self.run_page.map, canvas);
+            .draw(ui, &self.run_page.map, canvas, clip);
 
         let cp = egui::Color32::from_rgb(240, 180, 0);
         for &(lat, lon) in &cps {

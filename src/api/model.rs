@@ -98,6 +98,16 @@ pub struct Config {
     /// 底图瓦片坐标系：wgs84（OSM）或 gcj02（高德/腾讯）。
     #[serde(default = "default_tile_datum")]
     pub tile_datum: String,
+    /// 校园范围 `[min_lat, min_lon, max_lat, max_lon]`（BD-09）：地图只显示这一块。
+    #[serde(default)]
+    pub campus_bbox: Option<[f64; 4]>,
+    /// 是否把地图视野锁定在 [`Config::campus_bbox`] 内。
+    #[serde(default = "default_true")]
+    pub campus_lock: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {
@@ -166,6 +176,8 @@ impl Default for Config {
             tile_enabled: default_tile_enabled(),
             tile_url: default_tile_url(),
             tile_datum: default_tile_datum(),
+            campus_bbox: None,
+            campus_lock: true,
         }
     }
 }
