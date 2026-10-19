@@ -459,7 +459,7 @@ impl App {
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
         if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
             self.refresh_fence();
-            self.refresh_points();
+            self.refresh_points(false);
         }
 
         ui.add_space(8.0);

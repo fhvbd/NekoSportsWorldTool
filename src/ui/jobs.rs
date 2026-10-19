@@ -104,10 +104,14 @@ impl App {
         });
     }
 
-    /// 后台拉取实时点位并落盘（供路线预览使用），完成后触发预览刷新。
-    /// 复用 fetch_points 的 TTL 缓存，仅在 Road 模式且已配置定位（模拟位置或设备锚点）时拉取。
-    pub(crate) fn refresh_points(&mut self) {
-        if self.run_page.route_mode != RouteMode::Road {
+    /// 后台拉取实时点位并落盘（供路线预览 / 地图取点使用），完成后触发预览刷新。
+    ///
+    /// `force=false`：只在真实道路路由模式下自动拉取——经典模式不需要点位预览，
+    /// 少一个请求就少一份请求指纹。
+    /// `force=true`：用户在「模拟位置」页显式点「重新读取点位」，经典模式下也要
+    /// 能拿到点位云来看清学校范围、把锚点对齐到打卡点中心（限流 5 分钟 3 次，手动触发可控）。
+    pub(crate) fn refresh_points(&mut self, force: bool) {
+        if !force && self.run_page.route_mode != RouteMode::Road {
             return;
         }
         let Some(session) = self.session.clone() else {
@@ -139,7 +143,7 @@ impl App {
             match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
                 Ok(pts) => {
                     log(&format!(
-                        "√ [points] 点位已缓存 {} 个（供路线预览）",
+                        "√ [points] 点位已缓存 {} 个（供路线预览 / 地图取点）",
                         pts.len()
                     ));
                     tx.send(POINTS_DONE.to_string()).ok();

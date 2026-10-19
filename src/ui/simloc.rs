@@ -305,13 +305,14 @@ impl App {
                 .unwrap_or_default();
             page.points_loaded = true;
             page.map_ready = false;
-            self.refresh_points();
+            // 显式点击：经典模式下也要拉一次，才能看到学校范围并把锚点对齐到点位中心
+            self.refresh_points(true);
             page.flash("已重新读取点位缓存", false);
         }
         if page.points.is_empty() {
             ui.colored_label(
                 theme::warn(),
-                "还没有打卡点缓存：先登录、切到真实道路路由跑一次，或直接填坐标",
+                "还没有打卡点缓存：点上面的「重新读取点位」拉一次（需已登录），或直接填坐标",
             );
         } else {
             let origin = crate::api::model::cached_points_anchor()
@@ -347,7 +348,7 @@ impl App {
                                 self.status = "√ 模拟位置已保存".into();
                                 self.log.push("√  模拟位置已保存到 config.json");
                                 self.invalidate_run_preview();
-                                self.refresh_points();
+                                self.refresh_points(false);
                             }
                             Err(e) => page.flash(format!("保存失败：{e}"), true),
                         }
@@ -540,7 +541,7 @@ impl App {
                         Ok(()) => {
                             page.flash("√ 已应用收藏并保存", false);
                             self.invalidate_run_preview();
-                            self.refresh_points();
+                            self.refresh_points(false);
                         }
                         Err(e) => page.flash(format!("保存失败：{e}"), true),
                     }

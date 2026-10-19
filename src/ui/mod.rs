@@ -424,7 +424,7 @@ impl App {
             app.refresh_user_page();
             app.refresh_ai_list();
             app.refresh_fence();
-            app.refresh_points();
+            app.refresh_points(false);
         }
         // 已配置 OSM 路网则启动时后台加载
         if !app.config.osm_path.is_empty() {
