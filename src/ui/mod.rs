@@ -405,6 +405,13 @@ impl App {
             app.log
                 .push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
         }
+        // TLS 信任源一眼可见：证书报 UnknownIssuer 时先看这行的数量是否异常
+        app.log
+            .push(&format!("TLS 信任源：{}", crate::api::tls::summary()));
+        if crate::api::tls::root_count() == 0 {
+            app.log
+                .push("⚠ TLS 根证书为空：所有 HTTPS 请求都会报 UnknownIssuer");
+        }
         // 上次更新残留的 .old/.new 顺手清掉
         crate::update::cleanup_residue();
         // 启动检查更新（silent 静默 / ask 询问 / off 关闭）

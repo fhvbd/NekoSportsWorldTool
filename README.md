@@ -90,6 +90,10 @@ location rm <名称>               # 删除收藏
 - **检查更新失败**：更新仅直连 GitHub，网络不通时到 [Release](https://github.com/YanamiNeko/NekoSportsWorldTool/releases) 手动下载
 - **手动更新方式**：Windows 下载新的 `nekosportsworldtool.exe` 后退出软件，用新文件替换旧文件；请保留 `config.json`、`identity.json`、`points_cache.json` 等配置文件，不要删除或修改。
 - **人机验证失败**：自动重试 3 轮，仍失败大概率是网络波动，稍后再试
+- **登录报 `invalid peer certificate: UnknownIssuer`**：程序必须验得过站点证书链。启动后日志页第一行会打印 `TLS 信任源：系统 N 张 + 内置 M 张 + 额外 K 张`：
+  - `系统 0 张（系统库读取失败…）` → 本机证书库读不到（受限权限/精简系统），程序已自动用内置 Mozilla 根兜底，一般仍能登录；
+  - 数量正常却仍握手失败 → 网络里有 TLS 中间人（校园网 / 公司代理 / 杀软 HTTPS 扫描），把它的根证书导出成 PEM，设环境变量 `NEKO_CA_FILE=<路径>` 后重启程序（多个文件用 `;` 分隔）；
+  - 自检命令：`nekosportsworldtool tls`（打印信任源 + 对 Geetest 域名做一次握手），`--url` 可换目标。
 - **杀软误报**：未签名编译产物可能被误报，自行判断后加白
 
 ## 构建

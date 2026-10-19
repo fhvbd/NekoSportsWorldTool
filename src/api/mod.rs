@@ -16,4 +16,5 @@ pub mod rank;
 pub mod records;
 pub mod semester;
 pub mod submit;
+pub mod tls;
 pub mod user;

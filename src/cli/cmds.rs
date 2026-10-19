@@ -13,6 +13,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
         "logout" => cmd_logout(),
         "run" => cmd_run(&rest),
         "location" | "loc" => cmd_location(&rest),
+        "tls" => cmd_tls(&rest),
         "template" => cmd_template(&rest),
         "ai" => cmd_ai(&rest),
         "ai-list" => cmd_ai_list(),
@@ -410,6 +411,48 @@ fn print_location(cfg: &model::Config) {
         println!("收藏：");
         for f in &cfg.sim_favorites {
             println!("  - {}", f.summary());
+        }
+    }
+}
+
+/// TLS 自检：打印信任源构成，并可选做一次真实握手。
+///
+/// 登录报 `invalid peer certificate: UnknownIssuer` 时先跑这个：
+/// 根证书数量异常（明显偏小）说明系统证书库没读到；数量正常但握手失败，
+/// 基本是网络里有人做 TLS 中间人（校园网/公司代理/杀软 HTTPS 扫描），
+/// 用 `NEKO_CA_FILE=<代理 CA 的 PEM>` 指过去即可。
+fn cmd_tls(rest: &[&str]) -> i32 {
+    let flags = parse_flags(rest);
+    println!("TLS 信任源：{}", crate::api::tls::summary());
+    println!("根证书数量：{}", crate::api::tls::root_count());
+    if let Ok(path) = std::env::var(crate::api::tls::CA_FILE_ENV) {
+        println!("NEKO_CA_FILE={path}");
+    } else {
+        println!(
+            "NEKO_CA_FILE 未设置（如需信任自签/代理 CA，把 PEM 路径设进去）"
+        );
+    }
+    let url = get(&flags, "url")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            "https://gcaptcha4.geetest.com/load?captcha_id=8c065103d81f5fd3efec8ad3e3a84c30&challenge=probe&client_type=web&lang=zh".to_string()
+        });
+    println!("握手自检：{url}");
+    let agent = crate::api::client::make_agent();
+    match agent.get(&url).call() {
+        Ok(resp) => {
+            println!("√ TLS 握手通过，HTTP {}", resp.status());
+            0
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            println!("√ TLS 握手通过（HTTP {code}，服务端拒绝了这个探针参数，但证书链已验过）");
+            0
+        }
+        Err(ureq::Error::Transport(e)) => {
+            eprintln!("× TLS/传输失败：{e}");
+            eprintln!("  · 根证书数量明显偏小 → 系统证书库没读到（受限权限/精简系统）");
+            eprintln!("  · 数量正常 → 大概率是中间人代理，用 NEKO_CA_FILE 指定其 CA");
+            1
         }
     }
 }

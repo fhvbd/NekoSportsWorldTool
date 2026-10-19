@@ -30,6 +30,12 @@ egui_extras = { version = "0.29", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# TLS 信任源装配（src/api/tls.rs）：系统根 ∪ 内置 Mozilla 根 ∪ NEKO_CA_FILE。
+# 版本必须与 ureq 使用的 rustls 0.23 对齐，否则 ClientConfig 类型不兼容。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.7"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 aes = "0.9"
 cbc = { version = "0.2", features = ["alloc", "block-padding"] }
 rsa = "0.9"

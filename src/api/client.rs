@@ -10,9 +10,11 @@ use crate::crypto::envelope::{
 };
 use crate::crypto::header::{build_header_for, HeaderIdentity, UA_IOS};
 
+/// 统一的 ureq Agent：复用全局 rustls 配置（系统根 ∪ 内置 Mozilla 根 ∪ NEKO_CA_FILE）。
 pub fn make_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
+        .tls_config(crate::api::tls::client_config())
         .build()
 }
 

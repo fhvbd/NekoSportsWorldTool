@@ -31,6 +31,7 @@ fn usage() {
   location save <名称>                     把当前模拟位置存为收藏
   location use <名称>                      应用收藏
   location rm <名称>                       删除收藏
+  tls    [--url <https://...>]             打印 TLS 信任源（系统/内置/额外根）并做一次握手自检
   template --file <GPX/JSON>                本地读取真实记录，分析海拔（不会上传）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]
