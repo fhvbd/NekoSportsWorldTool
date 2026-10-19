@@ -92,6 +92,10 @@ impl SimLocPage {
             &cfg.tile_url,
             crate::location::Datum::parse(&cfg.tile_datum).unwrap_or(Datum::Wgs84),
         );
+        // 老配置（高德 style=8 注记叠加图）迁移到标准路网图
+        if let Some(url) = crate::ui::tiles::migrate_legacy_url(&page.tiles.url_template) {
+            page.tiles.url_template = url;
+        }
         page.campus = cfg.campus_bbox;
         page.campus_lock = cfg.campus_lock;
         page
@@ -407,6 +411,12 @@ impl App {
                     format!("已加载 {loaded} · 加载中 {inflight} · 失败 {failed}"),
                 );
             });
+            if crate::ui::tiles::is_jpeg_style(&page.tiles.url_template) {
+                ui.colored_label(
+                    theme::warn(),
+                    "卫星底图是 JPEG，当前版本没有 JPEG 解码器 —— 请用「标准」底图",
+                );
+            }
             if let Some(note) = page.tiles.note.clone() {
                 ui.colored_label(theme::warn(), format!("底图异常：{note}"));
             }

@@ -32,7 +32,12 @@ const TILE_UA: &str = "NekoSportsWorldTool/0.3.0 (+https://github.com/fhvbd/Neko
 /// 所以默认用 CDN 上的 Carto（OSM 数据、带中文注记、许可要求署名）。
 pub const PRESETS: [(&str, &str, Datum); 4] = [
     (
-        "Carto Voyager（默认，PNG）",
+        "高德标准（中文路网，GCJ-02）",
+        "https://webrd0{1-4}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}",
+        Datum::Gcj02,
+    ),
+    (
+        "Carto Voyager（PNG，英文注记）",
         "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
         Datum::Wgs84,
     ),
@@ -46,12 +51,21 @@ pub const PRESETS: [(&str, &str, Datum); 4] = [
         "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         Datum::Wgs84,
     ),
-    (
-        "高德（中文，GCJ-02，注意对方条款）",
-        "https://wprd0{1-4}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
-        Datum::Gcj02,
-    ),
 ];
+
+/// 高德老配置用的是 `style=8`（只有路网注记的透明叠加图，铺在浅底上显得发白），
+/// 这里迁移到 `style=7` 的标准路网图。
+pub fn migrate_legacy_url(url: &str) -> Option<String> {
+    if url.contains("appmaptile") && url.contains("style=8") && url.contains("wprd0") {
+        return Some(url.replace("style=8", "style=7").replace("wprd0{1-4}", "webrd0{1-4}"));
+    }
+    None
+}
+
+/// 卫星底图（高德 `webst` / `style=6`）返回 JPEG，当前版本没有 JPEG 解码器。
+pub fn is_jpeg_style(url: &str) -> bool {
+    url.contains("webst") || url.contains("style=6") || url.contains("World_Imagery")
+}
 
 /// 当前模板对应哪个预设（用于下拉框回显）。
 pub fn preset_index(url: &str) -> Option<usize> {
