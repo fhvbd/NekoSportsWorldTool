@@ -86,6 +86,18 @@ pub struct Config {
     /// 收藏的模拟位置（GUI 与 CLI 共用同一份）。
     #[serde(default)]
     pub sim_favorites: Vec<crate::location::SimLocation>,
+    /// 用户在可视化地图上画的手绘路线；有则可直接按它生成轨迹。
+    #[serde(default)]
+    pub drawn_route: Option<crate::track::drawn::DrawnRoute>,
+    /// 模拟位置页是否加载在线底图（默认开；关掉则只有矢量层/网格）。
+    #[serde(default = "default_tile_enabled")]
+    pub tile_enabled: bool,
+    /// 底图瓦片模板，`{z}`/`{x}`/`{y}` 会被替换（默认 OSM，PNG）。
+    #[serde(default = "default_tile_url")]
+    pub tile_url: String,
+    /// 底图瓦片坐标系：wgs84（OSM）或 gcj02（高德/腾讯）。
+    #[serde(default = "default_tile_datum")]
+    pub tile_datum: String,
 }
 
 impl Config {
@@ -118,6 +130,18 @@ fn default_update_check() -> String {
     "silent".into()
 }
 
+fn default_tile_enabled() -> bool {
+    true
+}
+
+fn default_tile_url() -> String {
+    "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png".into()
+}
+
+fn default_tile_datum() -> String {
+    "wgs84".into()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -138,6 +162,10 @@ impl Default for Config {
             route_mode: default_route_mode(),
             sim_location: None,
             sim_favorites: Vec::new(),
+            drawn_route: None,
+            tile_enabled: default_tile_enabled(),
+            tile_url: default_tile_url(),
+            tile_datum: default_tile_datum(),
         }
     }
 }

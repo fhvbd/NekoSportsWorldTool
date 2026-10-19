@@ -22,6 +22,7 @@ pub mod records;
 pub mod run;
 pub mod simloc;
 pub mod theme;
+pub mod tiles;
 pub mod user;
 
 use crate::api::model::{self, Config, HeaderIdentity, Session};

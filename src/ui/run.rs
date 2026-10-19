@@ -516,9 +516,88 @@ impl App {
         });
     }
 
+    /// 手绘路线的当次预览（底图 + 打卡点 + 折线）。
+    fn draw_drawn_preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        route: &crate::track::drawn::DrawnRoute,
+    ) {
+        let cps = crate::api::model::load_points_cache_any()
+            .map(|p| crate::api::points::points_bd(&p))
+            .unwrap_or_default();
+        let (response, painter) = ui.allocate_painter(
+            egui::Vec2::new(ui.available_width().max(200.0), 260.0),
+            egui::Sense::drag(),
+        );
+        let canvas = response.rect;
+        painter.rect_filled(
+            canvas,
+            egui::Rounding::ZERO,
+            egui::Color32::from_rgb(250, 252, 251),
+        );
+        if !self.run_page.map_fitted {
+            let mut bounds = route.points.clone();
+            bounds.extend(cps.iter().copied());
+            if bounds.len() >= 2 {
+                self.run_page.map.fit(canvas, &bounds);
+            }
+            self.run_page.map_fitted = true;
+        }
+        self.sim_loc_page
+            .tiles
+            .draw(ui, &self.run_page.map, canvas);
+
+        let cp = egui::Color32::from_rgb(240, 180, 0);
+        for &(lat, lon) in &cps {
+            self.run_page
+                .map
+                .draw_point(&painter, canvas, lat, lon, cp, 3.5);
+        }
+        let mut screen: Vec<egui::Pos2> = route
+            .points
+            .iter()
+            .map(|(lat, lon)| self.run_page.map.to_screen(canvas, *lat, *lon))
+            .collect();
+        if route.closed && screen.len() >= 2 {
+            screen.push(screen[0]);
+        }
+        if screen.len() >= 2 {
+            painter.add(egui::Shape::line(
+                screen,
+                egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(26, 115, 232)),
+            ));
+        }
+        painter.text(
+            egui::pos2(canvas.left() + 8.0, canvas.top() + 8.0),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "手绘路线 · {} · 打卡点 {} 个{}",
+                route.summary(),
+                cps.len(),
+                if cps.is_empty() {
+                    "（未拉点位，提交前请先到「模拟位置」页拉一次）"
+                } else {
+                    ""
+                }
+            ),
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_rgb(70, 84, 80),
+        );
+        self.run_page.map.interact(ui, canvas);
+    }
+
     /// 开始时间相关的提示。须在 `ensure_plan()` 之后调用，才对得上本次提交时刻。
     fn draw_run_warnings(&self, ui: &mut egui::Ui) {
         let page = &self.run_page;
+        if let Some(route) = self.config.drawn_route.as_ref().filter(|r| r.is_usable()) {
+            ui.colored_label(
+                theme::ok(),
+                format!(
+                    "手绘路线已启用：{}（优先于打卡点环/道路路由）",
+                    route.summary()
+                ),
+            );
+        }
         if let Some(sim) = self.config.active_sim() {
             if sim.city.trim().is_empty() {
                 ui.colored_label(
@@ -569,6 +648,11 @@ impl App {
     }
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
+        // 手绘路线优先：直接画用户画的那条，不再依赖 OSM 路网
+        if let Some(route) = self.config.drawn_route.clone().filter(|d| d.is_usable()) {
+            self.draw_drawn_preview(ui, &route);
+            return;
+        }
         if self.run_page.route_mode != RouteMode::Road {
             return;
         }
@@ -796,6 +880,8 @@ impl App {
         let identity = self.identity.clone();
         // 模拟位置：启用时覆盖设备锚点（flow 内部据此跳过锚点漂移）。
         let sim = self.config.active_sim().cloned();
+        // 手绘路线：保存过就按它生成轨迹（flow 内部优先于打卡点环/道路路由）。
+        let drawn = self.config.drawn_route.clone();
         let session = match self.session.clone() {
             Some(s) => s,
             None => {
@@ -819,6 +905,7 @@ impl App {
                 seed,
                 route_mode,
                 sim,
+                drawn,
             };
             let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
                 Ok(out) => {

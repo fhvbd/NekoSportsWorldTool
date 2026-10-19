@@ -1,23 +1,37 @@
-//! 模拟位置页：自己设定本次跑步的定位锚点。
+//! 模拟位置页：自己设定本次跑步的定位锚点，并在可视化地图上直接画路线。
 //!
 //! 定位锚点决定「向服务端要哪个学校的打卡点」，与设备信息页的
 //! `anchor_lat/anchor_lon` 语义相同但更可控：
 //! - 支持 WGS84 / GCJ-02 / BD-09 三种基准，内部统一换算成协议用的 BD-09；
 //! - 粘贴手机地图里复制的坐标（自动纠正「经度,纬度」顺序）；
-//! - 在地图上点选、对齐已缓存打卡点的中心；
+//! - 在线底图（OSM 瓦片）+ 打卡点云，取点/画线都在同一块画布上；
+//! - 手绘路线可撤销/拖拽顶点/闭环/一键串上打卡点，跑完按它生成轨迹；
 //! - 命名收藏，一键切换。
 //!
-//! 保存后写进 config.json（`sim_location` / `sim_favorites`），CLI 的
-//! `location` 子命令读写同一份，两端互通。
+//! 保存后写进 config.json（`sim_location` / `sim_favorites` / `drawn_route`），
+//! CLI 的 `location` 子命令读写同一份，两端互通。
 
 use super::map::MapState;
 use super::{mobile, theme, App};
 use crate::location::{self, Datum, SimLocation};
 use crate::platform::InputKind;
+use crate::track::drawn::{DrawnRoute, CHECKPOINT_TOL_M, MIN_USABLE_M};
 use eframe::egui;
 
 /// 地图画布高度。
 const MAP_HEIGHT: f32 = 240.0;
+/// 画路线用的画布更高，方便画复杂线路。
+const DRAW_HEIGHT: f32 = 420.0;
+
+/// 地图区在干什么。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MapMode {
+    /// 单击地图 = 把模拟位置挪过去
+    #[default]
+    Pick,
+    /// 单击地图 = 给手绘路线加一个拐点
+    Draw,
+}
 
 #[derive(Default)]
 pub struct SimLocPage {
@@ -39,6 +53,22 @@ pub struct SimLocPage {
     /// 已缓存的打卡点（BD-09），地图取点的参照物。
     pub points: Vec<(f64, f64)>,
     pub points_loaded: bool,
+    /// 地图模式：取点 / 画线。
+    pub mode: MapMode,
+    /// 手绘路线（BD-09 顶点）。
+    pub route: DrawnRoute,
+    /// 撤销栈。
+    pub undo: Vec<DrawnRoute>,
+    /// 画线视图（与取点视图分开，各自保持缩放）。
+    pub route_map: MapState,
+    pub route_map_ready: bool,
+    /// 正在拖动的顶点下标。
+    pub drag_vertex: Option<usize>,
+    /// 画线区的临时提示。
+    pub route_note: String,
+    /// 在线底图。
+    pub tiles: crate::ui::tiles::TileLayer,
+    pub tiles_ready: bool,
 }
 
 impl SimLocPage {
@@ -47,6 +77,12 @@ impl SimLocPage {
         if let Some(sim) = cfg.sim_location.as_ref() {
             page.load(sim);
         }
+        page.route = cfg.drawn_route.clone().unwrap_or_default();
+        page.tiles = crate::ui::tiles::TileLayer::new(
+            cfg.tile_enabled,
+            &cfg.tile_url,
+            crate::location::Datum::parse(&cfg.tile_datum).unwrap_or(Datum::Wgs84),
+        );
         page
     }
 
@@ -65,6 +101,14 @@ impl SimLocPage {
     fn set_point(&mut self, lat: f64, lon: f64) {
         self.lat_txt = format!("{lat:.6}");
         self.lon_txt = format!("{lon:.6}");
+    }
+
+    /// 记录一次可撤销的路线状态（上限 64 步）。
+    pub fn push_undo(&mut self) {
+        self.undo.push(self.route.clone());
+        if self.undo.len() > 64 {
+            self.undo.remove(0);
+        }
     }
 
     /// 按指定基准解析输入框。
@@ -293,11 +337,62 @@ impl App {
         ui.add_space(8.0);
         let mut reload_points = false;
         mobile::row(ui, |ui| {
-            ui.label(egui::RichText::new("地图取点").strong());
+            ui.label(egui::RichText::new("可视化地图").strong());
+            ui.selectable_value(&mut page.mode, MapMode::Pick, "取点");
+            ui.selectable_value(&mut page.mode, MapMode::Draw, "画路线");
             if ui.small_button("重新读取点位").clicked() {
                 reload_points = true;
             }
+            let mut tiles_on = page.tiles.enabled;
+            if ui.checkbox(&mut tiles_on, "在线底图").changed() {
+                page.tiles.enabled = tiles_on;
+                page.tiles_ready = false;
+                self.config.tile_enabled = tiles_on;
+                let _ = crate::api::model::save_config(&self.config);
+                if !tiles_on {
+                    page.tiles.reset();
+                }
+            }
         });
+        if page.tiles.enabled {
+            let current = crate::ui::tiles::preset_index(&page.tiles.url_template);
+            let label = current
+                .map(|i| crate::ui::tiles::PRESETS[i].0)
+                .unwrap_or("自定义 URL");
+            let mut chosen = current;
+            let mut changed = false;
+            mobile::row(ui, |ui| {
+                ui.label("底图源：");
+                egui::ComboBox::from_id_salt("tile_preset")
+                    .width(240.0)
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (i, (name, _, _)) in crate::ui::tiles::PRESETS.iter().enumerate() {
+                            if ui.selectable_value(&mut chosen, Some(i), *name).clicked() {
+                                changed = true;
+                            }
+                        }
+                    });
+                if let Some(note) = page.tiles.note.clone() {
+                    ui.colored_label(theme::warn(), note);
+                }
+            });
+            if changed {
+                if let Some(i) = chosen {
+                    let (_, url, datum) = crate::ui::tiles::PRESETS[i];
+                    page.tiles.url_template = url.to_string();
+                    page.tiles.datum = datum;
+                    page.tiles.reset();
+                    self.config.tile_url = url.to_string();
+                    self.config.tile_datum = datum.code().to_string();
+                    let _ = crate::api::model::save_config(&self.config);
+                    page.flash(
+                        format!("底图已切换为「{}」", crate::ui::tiles::PRESETS[i].0),
+                        false,
+                    );
+                }
+            }
+        }
         if reload_points {
             page.points_loaded = false;
             page.points = crate::api::model::load_points_cache_any()
@@ -305,6 +400,7 @@ impl App {
                 .unwrap_or_default();
             page.points_loaded = true;
             page.map_ready = false;
+            page.route_map_ready = false;
             // 显式点击：经典模式下也要拉一次，才能看到学校范围并把锚点对齐到点位中心
             self.refresh_points(true);
             page.flash("已重新读取点位缓存", false);
@@ -314,20 +410,27 @@ impl App {
                 theme::warn(),
                 "还没有打卡点缓存：点上面的「重新读取点位」拉一次（需已登录），或直接填坐标",
             );
-        } else {
-            let origin = crate::api::model::cached_points_anchor()
-                .map(|a| format!("，来自锚点 ({:.6},{:.6})", a.latitude, a.longitude))
-                .unwrap_or_default();
-            ui.colored_label(
-                theme::text_dim(),
-                format!("黄点为已缓存的打卡点（{} 个{origin}）", page.points.len()),
-            );
-            ui.colored_label(
-                theme::text_dim(),
-                "单击地图把模拟位置移到该处；拖拽平移、滚轮缩放。",
-            );
         }
-        self.draw_pick_map(ui, page);
+        match page.mode {
+            MapMode::Pick => {
+                ui.colored_label(
+                    theme::text_dim(),
+                    format!(
+                        "黄点为已缓存的打卡点（{} 个）。单击地图把模拟位置移到该处；拖拽平移、滚轮缩放。",
+                        page.points.len()
+                    ),
+                );
+                self.draw_pick_map(ui, page);
+            }
+            MapMode::Draw => {
+                ui.colored_label(
+                    theme::text_dim(),
+                    "单击地图加拐点，按住顶点拖动可调整，右键点顶点删除；空白处拖拽平移、滚轮缩放。",
+                );
+                self.draw_route_map(ui, page);
+                self.draw_route_toolbar(ui, page);
+            }
+        }
 
         // ── 操作 ────────────────────────────────────────────────
         ui.add_space(8.0);
@@ -594,6 +697,9 @@ impl App {
             page.map_ready = true;
         }
 
+        // 底图先铺，矢量层盖在上面
+        page.tiles.draw(ui, &page.map, canvas);
+
         let checkpoint = egui::Color32::from_rgb(240, 180, 0);
         for &(lat, lon) in &page.points {
             page.map
@@ -647,6 +753,401 @@ impl App {
         }
         page.map.interact(ui, canvas);
     }
+
+    /// 画线画布：在线底图 + 打卡点 + 手绘折线（加/拖/删顶点、缩放、比例尺）。
+    fn draw_route_map(&mut self, ui: &mut egui::Ui, page: &mut SimLocPage) {
+        let (response, painter) = ui.allocate_painter(
+            egui::Vec2::new(ui.available_width().max(200.0), DRAW_HEIGHT),
+            egui::Sense::click_and_drag(),
+        );
+        let canvas = response.rect;
+        painter.rect_filled(
+            canvas,
+            egui::Rounding::ZERO,
+            egui::Color32::from_rgb(250, 252, 251),
+        );
+
+        // 首次进入：视野对准打卡点与已画路线
+        if !page.route_map_ready {
+            let mut bounds = page.points.clone();
+            bounds.extend(page.route.points.iter().copied());
+            if bounds.len() >= 2 {
+                page.route_map.fit(canvas, &bounds);
+            } else {
+                let (lat, lon) = page
+                    .bd()
+                    .unwrap_or((self.identity.anchor_lat, self.identity.anchor_lon));
+                page.route_map.center = (lat, lon);
+                page.route_map.scale = 0.5;
+                page.route_map.offset = egui::Vec2::ZERO;
+            }
+            page.route_map_ready = true;
+        }
+
+        // ① 底图
+        page.tiles.draw(ui, &page.route_map, canvas);
+        let note = page.tiles.note.clone();
+        if let Some(n) = note {
+            painter.text(
+                egui::pos2(canvas.left() + 8.0, canvas.bottom() - 20.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("底图：{n}"),
+                egui::FontId::proportional(11.0),
+                theme::warn(),
+            );
+        }
+
+        // ② 打卡点
+        let cp_color = egui::Color32::from_rgb(240, 180, 0);
+        for &(lat, lon) in &page.points {
+            page.route_map
+                .draw_point(&painter, canvas, lat, lon, cp_color, 3.5);
+        }
+
+        // ③ 模拟位置锚点（空心十字，避免和路线混在一起）
+        if let Some((lat, lon)) = page.bd() {
+            let c = page.route_map.to_screen(canvas, lat, lon);
+            let stroke = egui::Stroke::new(1.5_f32, theme::err());
+            painter.circle_stroke(c, 6.0, stroke);
+            painter.line_segment(
+                [egui::pos2(c.x - 9.0, c.y), egui::pos2(c.x + 9.0, c.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(c.x, c.y - 9.0), egui::pos2(c.x, c.y + 9.0)],
+                stroke,
+            );
+        }
+
+        // ④ 手绘折线
+        let route_pts = page.route.points.clone();
+        if !route_pts.is_empty() {
+            let mut screen: Vec<egui::Pos2> = route_pts
+                .iter()
+                .map(|(la, lo)| page.route_map.to_screen(canvas, *la, *lo))
+                .collect();
+            if page.route.closed && screen.len() >= 2 {
+                screen.push(screen[0]);
+            }
+            if screen.len() >= 2 {
+                painter.add(egui::Shape::line(
+                    screen.clone(),
+                    egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(26, 115, 232)),
+                ));
+            }
+            // 顶点：首点绿、末点红、其它白底蓝边
+            for (i, p) in screen.iter().enumerate() {
+                let is_first = i == 0;
+                let is_last = i + 1 == route_pts.len() && !page.route.closed;
+                let fill = if is_first {
+                    egui::Color32::from_rgb(22, 160, 90)
+                } else if is_last {
+                    egui::Color32::from_rgb(220, 38, 38)
+                } else {
+                    egui::Color32::WHITE
+                };
+                let radius = if Some(i) == page.drag_vertex { 6.0 } else { 4.5 };
+                painter.circle_filled(*p, radius, fill);
+                painter.circle_stroke(
+                    *p,
+                    radius,
+                    egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(26, 115, 232)),
+                );
+            }
+        }
+
+        // ⑤ 比例尺
+        draw_scale_bar(&painter, canvas, &page.route_map);
+
+        // ── 交互 ──────────────────────────────────────────────
+        let hover_pos = ui.input(|i| i.pointer.hover_pos());
+        let hover = hover_pos.map(|p| canvas.contains(p)).unwrap_or(false);
+        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll != 0.0 && hover {
+            let anchor = hover_pos.unwrap_or(canvas.center());
+            let before = page.route_map.from_screen(canvas, anchor);
+            let factor = (scroll * 0.0015).exp();
+            page.route_map.scale = (page.route_map.scale * factor).clamp(0.01, 60.0);
+            let after = page.route_map.to_screen(canvas, before.0, before.1);
+            page.route_map.offset += anchor - after;
+        }
+
+        let pointer = response.interact_pointer_pos();
+        if response.drag_started() {
+            page.drag_vertex = pointer
+                .and_then(|p| nearest_vertex(&page.route_map, canvas, &page.route.points, p));
+        }
+        if response.dragged() {
+            match (page.drag_vertex, pointer) {
+                (Some(idx), Some(pos)) => {
+                    let (lat, lon) = page.route_map.from_screen(canvas, pos);
+                    page.route.move_vertex(idx, lat, lon);
+                }
+                (None, _) => {
+                    page.route_map.offset += ui.input(|i| i.pointer.delta());
+                }
+                _ => {}
+            }
+        }
+        if response.drag_stopped() {
+            page.drag_vertex = None;
+        }
+
+        // 左键单击空白处 = 追加拐点
+        if response.clicked() {
+            if let Some(pos) = pointer {
+                let (lat, lon) = page.route_map.from_screen(canvas, pos);
+                if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) {
+                    page.push_undo();
+                    page.route.points.push((lat, lon));
+                    page.route_note = format!(
+                        "已加第 {} 个拐点（BD-09 {lat:.6},{lon:.6}）",
+                        page.route.points.len()
+                    );
+                }
+            }
+        }
+        // 右键点顶点 = 删除
+        if response.secondary_clicked() {
+            if let Some(pos) = pointer {
+                if let Some(idx) =
+                    nearest_vertex(&page.route_map, canvas, &page.route.points, pos)
+                {
+                    page.push_undo();
+                    page.route.remove_vertex(idx);
+                    page.route_note = format!("已删除第 {} 个拐点", idx + 1);
+                }
+            }
+        }
+
+        // 左上角提示
+        painter.text(
+            egui::pos2(canvas.left() + 8.0, canvas.top() + 8.0),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "{} · 单击加点 / 拖顶点调整 / 右键删点 / 滚轮缩放",
+                if page.route.points.is_empty() {
+                    "空路线".to_string()
+                } else {
+                    page.route.summary()
+                }
+            ),
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_rgb(70, 84, 80),
+        );
+    }
+
+    /// 画线工具栏：统计、编辑、保存。
+    fn draw_route_toolbar(&mut self, ui: &mut egui::Ui, page: &mut SimLocPage) {
+        ui.add_space(4.0);
+        let gaps = page.route.checkpoint_gaps(&page.points);
+        let missed = gaps.iter().filter(|g| **g > CHECKPOINT_TOL_M).count();
+        if page.points.is_empty() {
+            ui.colored_label(
+                theme::text_dim(),
+                "没有打卡点缓存时也能画，但「串上打卡点」要先拉一次点位。",
+            );
+        } else if missed > 0 {
+            ui.colored_label(
+                theme::warn(),
+                format!(
+                    "{}/{} 个打卡点离路线超过 {:.0} m，点「串上打卡点」自动补进路线",
+                    missed,
+                    page.points.len(),
+                    CHECKPOINT_TOL_M
+                ),
+            );
+        } else {
+            ui.colored_label(
+                theme::ok(),
+                format!("{} 个打卡点都在路线上", page.points.len()),
+            );
+        }
+
+        let mut undo = false;
+        let mut clear = false;
+        let mut attach = false;
+        let mut fit = false;
+        let mut set_dist = false;
+        let mut save = false;
+        let mut remove_saved = false;
+        // 路线与当前模拟位置不在同一片区域时提醒（换了学校忘清路线）
+        if !page.route.is_empty() {
+            if let Some((lat, lon)) = page.bd() {
+                let far = page.route.max_distance_to(lat, lon);
+                if far > 3000.0 {
+                    ui.colored_label(
+                        theme::warn(),
+                        format!(
+                            "手绘路线离当前模拟位置约 {:.1} km，可能不是这所学校——换学校记得清空重画",
+                            far / 1000.0
+                        ),
+                    );
+                }
+            }
+        }
+        if !page.points.is_empty() {
+            if let Some(anchor) = crate::api::model::cached_points_anchor() {
+                ui.colored_label(
+                    theme::text_dim(),
+                    format!(
+                        "点位缓存来自锚点 ({:.6},{:.6})",
+                        anchor.latitude, anchor.longitude
+                    ),
+                );
+            }
+        }
+        mobile::row(ui, |ui| {
+            if ui.small_button("撤销").clicked() {
+                undo = true;
+            }
+            if ui.small_button("清空").clicked() {
+                clear = true;
+            }
+            let mut closed = page.route.closed;
+            if ui.checkbox(&mut closed, "闭环").changed() {
+                page.route.closed = closed;
+            }
+            if ui.button("串上打卡点").clicked() {
+                attach = true;
+            }
+            if ui.small_button("适配视野").clicked() {
+                fit = true;
+            }
+            if ui.button("按绘制长度设距离").clicked() {
+                set_dist = true;
+            }
+        });
+        mobile::row(ui, |ui| {
+            if ui.add(theme::primary_btn("保存路线")).clicked() {
+                save = true;
+            }
+            if self.config.drawn_route.is_some() && ui.button("清除已保存路线").clicked() {
+                remove_saved = true;
+            }
+            if self.config.drawn_route.is_some() {
+                ui.colored_label(theme::ok(), "跑步将按已保存的手绘路线生成");
+            }
+        });
+        if !page.route_note.is_empty() {
+            ui.colored_label(theme::text_dim(), page.route_note.clone());
+        }
+
+        if undo {
+            match page.undo.pop() {
+                Some(prev) => {
+                    page.route = prev;
+                    page.route_note = "已撤销".into();
+                }
+                None => page.route_note = "没有可撤销的操作".into(),
+            }
+        }
+        if clear {
+            page.push_undo();
+            page.route = DrawnRoute::default();
+            page.route_note = "已清空手绘路线".into();
+        }
+        if attach {
+            page.push_undo();
+            let n = page.route.attach_checkpoints(&page.points, CHECKPOINT_TOL_M);
+            page.route_note = if n == 0 {
+                "路线已经串上全部打卡点".into()
+            } else {
+                format!("已把 {n} 个打卡点插进路线")
+            };
+        }
+        if fit {
+            page.route_map_ready = false;
+        }
+        if set_dist {
+            let km = page.route.len_m() / 1000.0;
+            if km < 0.2 {
+                page.route_note = "路线太短，先画长一点再设距离".into();
+            } else {
+                self.run_page.dist_min = (km * 0.97) as f32;
+                self.run_page.dist_max = (km * 1.03) as f32;
+                self.run_page.regen_plan();
+                page.route_note =
+                    format!("已把跑步距离设为 {:.2}–{:.2} km", km * 0.97, km * 1.03);
+            }
+        }
+        if save {
+            match page.route.validate() {
+                Err(e) => page.flash(e, true),
+                Ok(()) if !page.route.is_usable() => page.flash(
+                    format!("路线太短（不足 {MIN_USABLE_M:.0} m），先画一段再保存"),
+                    true,
+                ),
+                Ok(()) => {
+                    self.config.drawn_route = Some(page.route.clone());
+                    match crate::api::model::save_config(&self.config) {
+                        Ok(()) => {
+                            page.flash("√ 手绘路线已保存，跑步会按它生成轨迹", false);
+                            self.invalidate_run_preview();
+                        }
+                        Err(e) => page.flash(format!("保存失败：{e}"), true),
+                    }
+                }
+            }
+        }
+        if remove_saved {
+            self.config.drawn_route = None;
+            match crate::api::model::save_config(&self.config) {
+                Ok(()) => {
+                    page.flash("已清除已保存的手绘路线", false);
+                    self.invalidate_run_preview();
+                }
+                Err(e) => page.flash(format!("保存失败：{e}"), true),
+            }
+        }
+    }
+}
+
+/// 屏幕距离最近且在 12 px 内的顶点。
+fn nearest_vertex(
+    map: &MapState,
+    canvas: egui::Rect,
+    points: &[(f64, f64)],
+    pos: egui::Pos2,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, (lat, lon)) in points.iter().enumerate() {
+        let p = map.to_screen(canvas, *lat, *lon);
+        let d = (p - pos).length();
+        if d <= 12.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// 左下角比例尺（自动挑 1/2/5 × 10^n 米）。
+fn draw_scale_bar(painter: &egui::Painter, canvas: egui::Rect, map: &MapState) {
+    let target_m = 100.0_f64;
+    let px = (target_m * map.scale as f64) as f32;
+    let (label, width) = if px > 260.0 {
+        ("500 m", 500.0 * map.scale)
+    } else if px < 40.0 {
+        ("20 m", 20.0 * map.scale)
+    } else {
+        ("100 m", px)
+    };
+    let y = canvas.bottom() - 12.0;
+    let x0 = canvas.left() + 10.0;
+    let stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(70, 84, 80));
+    painter.line_segment([egui::pos2(x0, y), egui::pos2(x0 + width, y)], stroke);
+    painter.line_segment([egui::pos2(x0, y - 4.0), egui::pos2(x0, y + 4.0)], stroke);
+    painter.line_segment(
+        [egui::pos2(x0 + width, y - 4.0), egui::pos2(x0 + width, y + 4.0)],
+        stroke,
+    );
+    painter.text(
+        egui::pos2(x0, y - 6.0),
+        egui::Align2::LEFT_BOTTOM,
+        label,
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_rgb(70, 84, 80),
+    );
 }
 
 #[cfg(test)]

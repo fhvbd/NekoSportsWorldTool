@@ -61,6 +61,147 @@ impl Rng {
     }
 }
 
+/// 弧长表：dense 相邻点距离的累加，长度为 dense.len() + 1。
+pub fn arc_table(dense: &[(f64, f64)]) -> Vec<f64> {
+    let mut arcs = vec![0.0f64];
+    for i in 1..=dense.len() {
+        let a = dense[i - 1];
+        let b = dense[i % dense.len()];
+        arcs.push(arcs[i - 1] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt());
+    }
+    arcs
+}
+
+fn catmull_rom(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), t: f64) -> (f64, f64) {
+    let (t2, t3) = (t * t, t * t * t);
+    let x = 0.5
+        * ((2.0 * p1.0)
+            + (-p0.0 + p2.0) * t
+            + (2.0 * p0.0 - 5.0 * p1.0 + 4.0 * p2.0 - p3.0) * t2
+            + (-p0.0 + 3.0 * p1.0 - 3.0 * p2.0 + p3.0) * t3);
+    let y = 0.5
+        * ((2.0 * p1.1)
+            + (-p0.1 + p2.1) * t
+            + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
+            + (-p0.1 + 3.0 * p1.1 - 3.0 * p2.1 + p3.1) * t3);
+    (x, y)
+}
+
+/// 手绘折线（BD 系）→ 闭合平面路径 + 弧长表 + 中心。
+///
+/// 与 [`make_point_ring`] 的区别：顶点顺序**完全按用户画的样子**（不再按质心角排序），
+/// 段间用 Catmull-Rom 平滑（手绘折线转角太硬，真人轨迹是圆滑的），
+/// 每段采样数按长度自适应（≈1.5 m 一个密集点），弧长插值才够准。
+///
+/// `closed=false` 时按「原路折返」闭合成环：A→B→C→B→A，
+/// 这样往返跑与单圈跑都能用同一个环形模型。
+pub fn make_path_ring(path_bd: &[(f64, f64)], closed: bool) -> PointRing {
+    let n = path_bd.len();
+    let cx = path_bd.iter().map(|q| q.0).sum::<f64>() / n as f64;
+    let cy = path_bd.iter().map(|q| q.1).sum::<f64>() / n as f64;
+    let plane: Vec<(f64, f64)> = path_bd
+        .iter()
+        .map(|q| ((q.1 - cy) * MET_PER_DEG_LNG, (q.0 - cx) * MET_PER_DEG_LAT))
+        .collect();
+
+    // ① 折返：把回程点接在末尾（去掉重复的终点）
+    let mut pts = plane.clone();
+    if !closed {
+        for p in plane.iter().rev().skip(1) {
+            pts.push(*p);
+        }
+    }
+
+    // ② 去掉过近的相邻点（<0.5 m），避免 Catmull-Rom 出现尖角/除零
+    let mut cleaned: Vec<(f64, f64)> = Vec::with_capacity(pts.len());
+    for p in pts {
+        if let Some(last) = cleaned.last() {
+            let d = ((p.0 - last.0).powi(2) + (p.1 - last.1).powi(2)).sqrt();
+            if d < 0.5 {
+                continue;
+            }
+        }
+        cleaned.push(p);
+    }
+    if closed && cleaned.len() >= 2 {
+        // 闭环时首尾若重合则去掉末点（环形周期插值不需要重复点）
+        let (first, last) = (cleaned[0], cleaned[cleaned.len() - 1]);
+        if ((first.0 - last.0).powi(2) + (first.1 - last.1).powi(2)).sqrt() < 0.5 {
+            cleaned.pop();
+        }
+    }
+    let m = cleaned.len();
+    if m < 2 {
+        return (Vec::new(), vec![0.0], (cx, cy));
+    }
+
+    // ③ 分段平滑采样
+    let mut dense: Vec<(f64, f64)> = Vec::with_capacity(m * 8);
+    for i in 0..m {
+        let p0 = cleaned[(i + m - 1) % m];
+        let p1 = cleaned[i];
+        let p2 = cleaned[(i + 1) % m];
+        let p3 = cleaned[(i + 2) % m];
+        let seg = ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
+        let samples = ((seg / 1.5).ceil() as usize).clamp(3, 96);
+        for j in 0..samples {
+            dense.push(catmull_rom(p0, p1, p2, p3, j as f64 / samples as f64));
+        }
+    }
+    let arcs = arc_table(&dense);
+    (dense, arcs, (cx, cy))
+}
+
+/// 点到折线的最近距离（米）与该点投影到的段序号，`closed` 决定是否算首尾连线。
+pub fn distance_to_polyline(
+    pt: (f64, f64),
+    path: &[(f64, f64)],
+    closed: bool,
+) -> (f64, Option<usize>) {
+    if path.len() < 2 {
+        return (f64::INFINITY, None);
+    }
+    let mut best = (f64::INFINITY, None);
+    let segs = if closed { path.len() } else { path.len() - 1 };
+    for i in 0..segs {
+        let a = path[i];
+        let b = path[(i + 1) % path.len()];
+        let (ax, ay) = ((a.1) * MET_PER_DEG_LNG, (a.0) * MET_PER_DEG_LAT);
+        let (bx, by) = ((b.1) * MET_PER_DEG_LNG, (b.0) * MET_PER_DEG_LAT);
+        let (px, py) = ((pt.1) * MET_PER_DEG_LNG, (pt.0) * MET_PER_DEG_LAT);
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 <= 1e-9 {
+            0.0
+        } else {
+            (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+        };
+        let (qx, qy) = (ax + dx * t, ay + dy * t);
+        let d = ((px - qx).powi(2) + (py - qy).powi(2)).sqrt();
+        if d < best.0 {
+            best = (d, Some(i));
+        }
+    }
+    best
+}
+
+/// 折线长度（米）。
+pub fn polyline_len_m(path: &[(f64, f64)], closed: bool) -> f64 {
+    if path.len() < 2 {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    let segs = if closed { path.len() } else { path.len() - 1 };
+    for i in 0..segs {
+        let a = path[i];
+        let b = path[(i + 1) % path.len()];
+        let dx = (b.1 - a.1) * MET_PER_DEG_LNG;
+        let dy = (b.0 - a.0) * MET_PER_DEG_LAT;
+        total += (dx * dx + dy * dy).sqrt();
+    }
+    total
+}
+
 /// 打卡点 BD 系 (lat, lng) → 闭合平面路径 + 弧长表 + 中心。
 pub type PointRing = (Vec<(f64, f64)>, Vec<f64>, (f64, f64));
 pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
@@ -85,19 +226,7 @@ pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
         let p2 = plane[(i + 1) % n];
         let p3 = plane[(i + 2) % n];
         for j in 0..samples {
-            let t = j as f64 / samples as f64;
-            let (t2, t3) = (t * t, t * t * t);
-            let x = 0.5
-                * ((2.0 * p1.0)
-                    + (-p0.0 + p2.0) * t
-                    + (2.0 * p0.0 - 5.0 * p1.0 + 4.0 * p2.0 - p3.0) * t2
-                    + (-p0.0 + 3.0 * p1.0 - 3.0 * p2.0 + p3.0) * t3);
-            let y = 0.5
-                * ((2.0 * p1.1)
-                    + (-p0.1 + p2.1) * t
-                    + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
-                    + (-p0.1 + 3.0 * p1.1 - 3.0 * p2.1 + p3.1) * t3);
-            dense.push((x, y));
+            dense.push(catmull_rom(p0, p1, p2, p3, j as f64 / samples as f64));
         }
     }
     let mut arcs = vec![0.0f64];

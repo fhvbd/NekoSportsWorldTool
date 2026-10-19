@@ -2,6 +2,7 @@
 
 pub mod altitude;
 pub mod calorie;
+pub mod drawn;
 pub mod generate_road;
 pub mod generator;
 pub mod geom;
@@ -11,8 +12,9 @@ pub mod wire;
 
 #[cfg(test)]
 mod tests {
+    use super::drawn::DrawnRoute;
     use super::generate_road::build_road;
-    use super::generator::build;
+    use super::generator::{build, build_on_path};
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
 
     use super::wire::*;
@@ -208,6 +210,94 @@ mod tests {
                     t.totalDistance
                 );
             }
+        }
+    }
+
+    /// 手绘路线：距离/时长精确、轨迹贴着画的折线走、打卡点仍被吸附命中。
+    #[test]
+    fn test_build_on_drawn_path() {
+        // 约 230 m × 260 m 的方形环，总长 ≈ 980 m
+        let square = vec![
+            (38.9000, 121.5400),
+            (38.9000, 121.5430),
+            (38.9023, 121.5430),
+            (38.9023, 121.5400),
+        ];
+        let route = DrawnRoute {
+            points: square.clone(),
+            closed: true,
+        };
+        assert!(route.len_m() > 900.0 && route.len_m() < 1100.0, "{}", route.len_m());
+
+        // 跑 2 圈（约 2 km，6'00"/km → 720 s）
+        let track = build_on_path(
+            &route.points,
+            route.closed,
+            1960.0,
+            720,
+            7,
+            1_788_958_186_123,
+            &square,
+        );
+        assert!((track.totalDistance - 1960.0).abs() < 1.0, "{}", track.totalDistance);
+        assert_eq!(track.totalTime, 720);
+        // 除收尾断崖点外，轨迹都该落在画的方形附近（含抖动 < 20 m）
+        let n = track.locations.len();
+        for p in track.locations.iter().take(n - 1) {
+            let d_lat = (p.gLat - 38.9012).abs() * MET_PER_DEG_LAT;
+            let d_lng = (p.gLng - 121.5415).abs() * MET_PER_DEG_LNG;
+            assert!(d_lat < 200.0 && d_lng < 200.0, "偏出画的区域: {d_lat}/{d_lng}");
+            assert!(p.totalDis.is_finite() && p.totalDis >= 0.0);
+        }
+        // 12 个顶点（含首尾）都在画的方形上
+        for (la, lo) in &square {
+            let min_m = track
+                .locations
+                .iter()
+                .map(|p| {
+                    (((p.gLat - la) * MET_PER_DEG_LAT).powi(2)
+                        + ((p.gLng - lo) * MET_PER_DEG_LNG).powi(2))
+                    .sqrt()
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(min_m < 1.0, "顶点未被吸附: {min_m}m");
+        }
+        // 10 秒窗仍然合法（判定依据）
+        for w in &track.speedPerTenSec {
+            let pace = 1000.0 / (w.value / 10.0);
+            assert!((141.0..=600.0).contains(&pace), "配速越界 {pace}");
+        }
+    }
+
+    /// 不闭环的手绘线按「原路折返」处理：环长 ≈ 2 倍折线长。
+    #[test]
+    fn test_open_drawn_path_becomes_out_and_back() {
+        let line = vec![(38.9000, 121.5400), (38.9000, 121.5450)]; // ≈ 430 m
+        let route = DrawnRoute {
+            points: line.clone(),
+            closed: false,
+        };
+        let straight = route.len_m();
+        assert!(straight > 400.0 && straight < 460.0, "{straight}");
+        let track = build_on_path(
+            &route.points,
+            route.closed,
+            straight * 2.0,
+            300,
+            11,
+            1_788_958_186_123,
+            &line,
+        );
+        assert!((track.totalDistance - straight * 2.0).abs() < 2.0);
+        // 折返不应该跑出这条线的两端之外（异常漂移点与收尾断崖不参与判断）
+        for p in track
+            .locations
+            .iter()
+            .take(track.locations.len().saturating_sub(2))
+            .filter(|p| p.ptype != -1)
+        {
+            let off = (p.gLat - 38.9).abs() * MET_PER_DEG_LAT;
+            assert!(off < 30.0, "跑出线外 {off}m");
         }
     }
 

@@ -1,12 +1,18 @@
 //! 自然轨迹生成器。
 //!
-//! 画像驱动：打卡点拟合闭合环（Catmull-Rom，每段 18 采样）→ 弧长表；
+//! 画像驱动：路径拟合闭合环（Catmull-Rom 平滑）→ 弧长表；
 //! 采样间隔主 5s（80%）；速度曲线 = ramp × 疲劳 × 三正弦 × 余弦凹陷 × 微噪；
 //! 正常点按速度曲线分配位移并归一到精确总距离；异常点（-1）零位移/跳变；
 //! 哨兵点（首 type∈{0,7}、索引1 type=5、末 type=6）；结尾断崖；点位吸附。
+//!
+//! 路径来源两种：[`build`] 用打卡点拟合环（经典算法），[`build_on_path`] 用用户
+//! 在可视化地图上画的折线——两者共用 [`build_on_ring`] 这一套统计/速度/步频逻辑。
 #![allow(non_snake_case)]
 
-use super::geom::{fmt_gain_time, make_point_ring, ring_point_at, round_to, to_bd, Rng, MET_PER_DEG_LAT, MET_PER_DEG_LNG};
+use super::geom::{
+    fmt_gain_time, make_path_ring, make_point_ring, ring_point_at, round_to, to_bd, Rng,
+    MET_PER_DEG_LAT, MET_PER_DEG_LNG,
+};
 use super::model::{GenPoint, Segment, TenWindow, Track};
 use super::postfix::apply_post_fixes;
 
@@ -41,9 +47,45 @@ pub fn build(
     start_ms: i64,
     points_bd: &[(f64, f64)],
 ) -> Track {
+    let (dense, arcs, center) = make_point_ring(points_bd);
+    build_on_ring(&dense, &arcs, center, dist, dur, seed, start_ms, points_bd)
+}
+
+/// 手绘路线入口：`path_bd` 为用户画的折线（BD-09），`closed` 决定终点是否连回起点。
+///
+/// 折线会先被平滑成闭合环（未闭环时按原路折返闭合），再走与经典算法
+/// 完全相同的速度曲线、步频、10 秒窗与点位吸附，所以提交结构与普通跑步一致。
+pub fn build_on_path(
+    path_bd: &[(f64, f64)],
+    closed: bool,
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+) -> Track {
+    let (dense, arcs, center) = make_path_ring(path_bd, closed);
+    // 退化路线（点重合/过短）兜底成打卡点环，避免空路径除零
+    if dense.len() < 2 {
+        let (dense, arcs, center) = make_point_ring(points_bd);
+        return build_on_ring(&dense, &arcs, center, dist, dur, seed, start_ms, points_bd);
+    }
+    build_on_ring(&dense, &arcs, center, dist, dur, seed, start_ms, points_bd)
+}
+
+/// 环形路径上的通用生成逻辑（经典算法与手绘路线共用）。
+fn build_on_ring(
+    dense: &[(f64, f64)],
+    arcs: &[f64],
+    pc: (f64, f64),
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+) -> Track {
     let mut rng = Rng::new(seed);
     let dur_f = dur as f64;
-    let (dense, arcs, pc) = make_point_ring(points_bd);
     let (c_lat, c_lng) = pc;
     let direction: f64 = rng.choice(&[1.0, -1.0]);
     let s0 = rng.uniform(0.0, *arcs.last().unwrap_or(&400.0));
@@ -162,7 +204,7 @@ pub fn build(
         let dt = dts[i];
         let (typ, lt) = kinds[i];
         t_acc += dt;
-        let pos = |ss: f64| ring_point_at(&dense, &arcs, ss);
+        let pos = |ss: f64| ring_point_at(dense, arcs, ss);
         let mut d_step = 0.0f64;
         let px;
         let py;

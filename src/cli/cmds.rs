@@ -175,6 +175,11 @@ fn cmd_run(rest: &[&str]) -> i32 {
     if let Some(sim) = &sim {
         println!("模拟位置：{}", sim.summary());
     }
+    // 手绘路线（GUI「模拟位置」页画的那条，存在 config.json 里）
+    let drawn = cfg.drawn_route.clone().filter(|d| d.is_usable());
+    if let Some(route) = &drawn {
+        println!("手绘路线：{}", route.summary());
+    }
     let params = crate::api::flow::RunParams {
         dist,
         dur,
@@ -185,6 +190,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
         seed,
         route_mode,
         sim,
+        drawn,
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {

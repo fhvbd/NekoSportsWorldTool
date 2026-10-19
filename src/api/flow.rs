@@ -31,6 +31,8 @@ pub struct RunParams {
     pub route_mode: RouteMode,
     /// 用户自定的模拟位置：启用时覆盖设备信息页锚点，且本次不再自动漂移锚点。
     pub sim: Option<crate::location::SimLocation>,
+    /// 用户在可视化地图上画的手绘路线：可用时优先于打卡点环/道路路由。
+    pub drawn: Option<crate::track::drawn::DrawnRoute>,
 }
 
 pub struct RunOutcome {
@@ -191,8 +193,43 @@ pub fn run_full_flow(
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
-    let mut track = match params.route_mode {
-        RouteMode::Road => {
+    // 手绘路线优先：用户画的折线直接当路径，不再走打卡点环/道路路由
+    let drawn = params.drawn.clone().filter(|d| d.is_usable());
+    let mut track = if let Some(drawn) = drawn.as_ref() {
+        drawn.validate()?;
+        let gaps = drawn.checkpoint_gaps(&pts_bd);
+        let missed = gaps.iter().filter(|g| **g > 40.0).count();
+        log(&format!(
+            "√ [track] 使用手绘路线 {}（{} 个打卡点在 40 m 内）",
+            drawn.summary(),
+            gaps.len().saturating_sub(missed)
+        ));
+        if missed > 0 {
+            log(&format!(
+                "⚠ [track] 有 {missed} 个打卡点离手绘路线超过 40 m，可能被判「未经过」——建议在「模拟位置」页点「串上打卡点」"
+            ));
+        }
+        let center = pts_bd
+            .first()
+            .copied()
+            .unwrap_or((anchor.latitude, anchor.longitude));
+        let _ = center;
+        crate::track::generator::build_on_path(
+            &drawn.points,
+            drawn.closed,
+            params.dist,
+            params.dur,
+            params.seed,
+            start_ms,
+            if pts_bd.is_empty() {
+                &drawn.points
+            } else {
+                &pts_bd
+            },
+        )
+    } else {
+        match params.route_mode {
+            RouteMode::Road => {
             let cfg = crate::api::model::load_config();
             if cfg.osm_path.is_empty() {
                 log("⚠ [track] 未配置 OSM 路网，回退经典算法");
@@ -277,6 +314,7 @@ pub fn run_full_flow(
             start_ms,
             &pts_bd,
         ),
+        }
     };
     if let Some(range) = params.manual_altitude_range {
         crate::track::altitude::override_bd_a_range(&mut track, range)?;
