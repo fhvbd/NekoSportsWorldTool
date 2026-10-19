@@ -373,10 +373,15 @@ impl App {
                             }
                         }
                     });
-                if let Some(note) = page.tiles.note.clone() {
-                    ui.colored_label(theme::warn(), note);
-                }
+                let (loaded, inflight, failed) = page.tiles.stats();
+                ui.colored_label(
+                    theme::text_dim(),
+                    format!("已加载 {loaded} · 加载中 {inflight} · 失败 {failed}"),
+                );
             });
+            if let Some(note) = page.tiles.note.clone() {
+                ui.colored_label(theme::warn(), format!("底图异常：{note}"));
+            }
             if changed {
                 if let Some(i) = chosen {
                     let (_, url, datum) = crate::ui::tiles::PRESETS[i];
@@ -785,7 +790,24 @@ impl App {
         }
 
         // ① 底图
-        page.tiles.draw(ui, &page.route_map, canvas);
+        let painted = page.tiles.draw(ui, &page.route_map, canvas);
+        if page.tiles.enabled && !painted {
+            let (loaded, inflight, _) = page.tiles.stats();
+            let msg = if loaded == 0 && inflight > 0 {
+                "底图加载中…"
+            } else if let Some(note) = &page.tiles.note {
+                &format!("底图不可用：{note}")
+            } else {
+                "底图加载中…"
+            };
+            painter.text(
+                canvas.center(),
+                egui::Align2::CENTER_CENTER,
+                msg,
+                egui::FontId::proportional(13.0),
+                theme::text_dim(),
+            );
+        }
         let note = page.tiles.note.clone();
         if let Some(n) = note {
             painter.text(

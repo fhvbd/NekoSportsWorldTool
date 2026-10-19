@@ -59,7 +59,7 @@ pub fn preset_index(url: &str) -> Option<usize> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct Key {
+pub(crate) struct Key {
     z: u8,
     x: u32,
     y: u32,
@@ -131,30 +131,15 @@ impl TileLayer {
             return false;
         }
         self.drain(ui.ctx());
-        let Some((z, range)) = self.view(map, rect) else {
+        let visible = self.visible(map, rect);
+        if visible.is_empty() {
+            self.note.get_or_insert_with(|| "视野超出可用瓦片范围".into());
             return false;
-        };
-        self.zoom = z;
+        }
+        self.zoom = visible[0].0.z;
         let painter = ui.painter_at(rect);
-        let n = 2f64.powi(z as i32);
         let mut painted = false;
-        for (x, y) in range {
-            let key = Key { z, x, y };
-            let Some((lon0, lat0, lon1, lat1)) = tile_bounds(key, n) else {
-                continue;
-            };
-            // 瓦片坐标系 → BD-09 → 屏幕
-            let (bd_lat0, bd_lon0) = location::to_bd09(lat0, lon0, self.datum);
-            let (bd_lat1, bd_lon1) = location::to_bd09(lat1, lon1, self.datum);
-            let p0 = map.to_screen(rect, bd_lat0, bd_lon0);
-            let p1 = map.to_screen(rect, bd_lat1, bd_lon1);
-            let tile_rect = Rect::from_min_max(
-                egui::pos2(p0.x.min(p1.x), p0.y.min(p1.y)),
-                egui::pos2(p0.x.max(p1.x), p0.y.max(p1.y)),
-            );
-            if !tile_rect.intersects(rect) {
-                continue;
-            }
+        for (key, tile_rect) in visible {
             match self.tiles.get(&key) {
                 Some(Tile::Ready(tex)) => {
                     painter.image(
@@ -187,42 +172,84 @@ impl TileLayer {
         painted
     }
 
-    /// 计算当前视图需要的缩放级别与瓦片范围。
-    fn view(&self, map: &MapState, rect: Rect) -> Option<(u8, Vec<(u32, u32)>)> {
+    /// `(已加载, 请求中, 失败)`，界面用来提示底图状态。
+    pub fn stats(&self) -> (usize, usize, usize) {
+        (self.tiles.len(), self.inflight.len(), self.failed.len())
+    }
+
+    /// 本帧需要绘制/请求的瓦片：`(key, 屏幕矩形)`，按离视野中心由近到远排序。
+    pub fn visible(&self, map: &MapState, rect: Rect) -> Vec<(Key, Rect)> {
         let lat = map.center.0;
-        if !lat.is_finite() {
-            return None;
+        if !lat.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
+            return Vec::new();
         }
-        // 目标分辨率 √(m/px) = 1/scale，用墨卡托公式反推 z
         let scale = map.scale.max(0.02) as f64;
-        let z = (156_543.033_92 * lat.to_radians().cos() * scale).log2().round();
-        let z = z.clamp(2.0, 19.0) as u8;
+        let zf = (156_543.033_92 * lat.to_radians().cos() * scale)
+            .log2()
+            .round()
+            .clamp(2.0, 19.0);
+        let z = zf as u8;
         let n = 2f64.powi(z as i32);
-        let (fx0, fy0) = lonlat_to_tile(map.center.1, lat, z, n);
-        let half_w = rect.width() as f64 / 2.0 / TILE_PX;
-        let half_h = rect.height() as f64 / 2.0 / TILE_PX;
-        // 反向缩放（地图 scale 与瓦片原生分辨率不完全相等时按比例换算）
-        let px_per_tile = TILE_PX * (1.0 / scale)
-            * (156_543.033_92 * lat.to_radians().cos() / n);
-        let _ = px_per_tile;
-        let x0 = (fx0 - half_w - map.offset.x as f64 / TILE_PX).floor() as i64;
-        let x1 = (fx0 + half_w - map.offset.x as f64 / TILE_PX).ceil() as i64;
-        let y0 = (fy0 - half_h - map.offset.y as f64 / TILE_PX).floor() as i64;
-        let y1 = (fy0 + half_h - map.offset.y as f64 / TILE_PX).ceil() as i64;
-        let mut keys = Vec::new();
+        let (fx0, fy0) = {
+            // 地图内部是 BD-09，而瓦片索引要按**瓦片自己的坐标系**算，
+            // 否则 WGS84/GCJ02 的 500 m 偏移会让请求的瓦片整体错位（表现就是底图空白）
+            let (t_lat, t_lon) = location::from_bd09(lat, map.center.1, self.datum);
+            lonlat_to_tile(t_lon, t_lat, z, n)
+        };
+        // 屏幕上一张瓦片占多少像素：地面 256*r 米 × scale(px/m)
+        let r = 156_543.033_92 * lat.to_radians().cos() / n;
+        let tile_px = (TILE_PX * r * scale).max(24.0);
+        let half_w = rect.width() as f64 / (2.0 * tile_px);
+        let half_h = rect.height() as f64 / (2.0 * tile_px);
+        // 注意：lonlat_to_tile 返回的是 0..1 的**归一化**瓦片坐标，必须乘 n 才是瓦片序号
+        let cx_t = fx0 * n - map.offset.x as f64 / tile_px;
+        let cy_t = fy0 * n - map.offset.y as f64 / tile_px;
+        let x0 = (cx_t - half_w).floor() as i64;
+        let x1 = (cx_t + half_w).ceil() as i64;
+        let y0 = (cy_t - half_h).floor() as i64;
+        let y1 = (cy_t + half_h).ceil() as i64;
+        let mut out: Vec<(Key, Rect)> = Vec::new();
         for y in y0..=y1 {
+            if y < 0 || y as f64 >= n {
+                continue;
+            }
             for x in x0..=x1 {
-                if y < 0 || y as f64 >= n {
-                    continue;
-                }
                 let xw = x.rem_euclid(n as i64) as u32;
-                keys.push((xw, y as u32));
-                if keys.len() >= MAX_TILES_PER_VIEW {
-                    return Some((z, keys));
+                let key = Key {
+                    z,
+                    x: xw,
+                    y: y as u32,
+                };
+                let Some((lon0, lat0, lon1, lat1)) = tile_bounds(key, n) else {
+                    continue;
+                };
+                let (bd_lat0, bd_lon0) = location::to_bd09(lat0, lon0, self.datum);
+                let (bd_lat1, bd_lon1) = location::to_bd09(lat1, lon1, self.datum);
+                let p0 = map.to_screen(rect, bd_lat0, bd_lon0);
+                let p1 = map.to_screen(rect, bd_lat1, bd_lon1);
+                let tr = Rect::from_min_max(
+                    egui::pos2(p0.x.min(p1.x), p0.y.min(p1.y)),
+                    egui::pos2(p0.x.max(p1.x), p0.y.max(p1.y)),
+                );
+                if tr.intersects(rect) {
+                    out.push((key, tr));
+                }
+                if out.len() >= MAX_TILES_PER_VIEW {
+                    break;
                 }
             }
+            if out.len() >= MAX_TILES_PER_VIEW {
+                break;
+            }
         }
-        Some((z, keys))
+        // 近中心优先，先看到地图
+        let c = rect.center();
+        out.sort_by(|a, b| {
+            let da = a.1.center().distance(c);
+            let db = b.1.center().distance(c);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out
     }
 
     fn request(&mut self, key: Key) {
@@ -232,8 +259,11 @@ impl TileLayer {
         if self.inflight.len() >= MAX_INFLIGHT || self.requested >= MAX_TILES_TOTAL {
             return;
         }
+        // 支持 {1-4} 这类子域占位（高德瓦片），按 tile 坐标轮转取一个，避免撞同一个域名
+        let sub = (key.x + key.y) % 4 + 1;
         let url = self
             .url_template
+            .replace("{1-4}", &sub.to_string())
             .replace("{z}", &key.z.to_string())
             .replace("{x}", &key.x.to_string())
             .replace("{y}", &key.y.to_string());
@@ -335,27 +365,102 @@ mod tests {
         assert!((lat - 38.901678).abs() < 1e-9, "lat={lat}");
     }
 
+    fn layer() -> TileLayer {
+        TileLayer::new(
+            true,
+            "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+            Datum::Wgs84,
+        )
+    }
+
+    /// 视野内的瓦片必须真的落在画布上——这是"底图一片空白"的回归测试。
+    #[test]
+    fn visible_tiles_cover_the_canvas() {
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1290.0, 420.0));
+        // 手工核对一张瓦片：几何换算是否正确
+        let n = 2f64.powi(18);
+        let key = Key {
+            z: 18,
+            x: 213_338,
+            y: 109_664,
+        };
+        let (lon0, lat0, lon1, lat1) = tile_bounds(key, n).unwrap();
+        let (c_lat, c_lon) = location::to_bd09(28.188_424, 112.975_708, Datum::Gcj02);
+        let map = MapState {
+            center: (c_lat, c_lon),
+            scale: 1.88,
+            ..Default::default()
+        };
+        let (bl, bo) = location::to_bd09(lat0, lon0, Datum::Wgs84);
+        let p0 = map.to_screen(rect, bl, bo);
+        let (bl2, bo2) = location::to_bd09(lat1, lon1, Datum::Wgs84);
+        let p1 = map.to_screen(rect, bl2, bo2);
+        println!(
+            "tile bounds lon {lon0:.5}..{lon1:.5} lat {lat1:.5}..{lat0:.5}; screen {p0:?} -> {p1:?}"
+        );
+        for scale in [0.05_f32, 0.3, 1.88, 8.0] {
+            let map = MapState {
+                center: (c_lat, c_lon),
+                scale,
+                ..Default::default()
+            };
+            let tiles = layer().visible(&map, rect);
+            assert!(!tiles.is_empty(), "scale={scale} 没算出任何瓦片");
+            // 视野中心必须被某张瓦片覆盖
+            let c = rect.center();
+            assert!(
+                tiles.iter().any(|(_, r)| r.contains(c)),
+                "scale={scale} 中心没被瓦片覆盖: {:?}",
+                tiles.iter().take(3).collect::<Vec<_>>()
+            );
+            // 瓦片在屏幕上不至于小到看不见
+            for (_, r) in tiles.iter().take(4) {
+                assert!(r.width() > 20.0 && r.height() > 20.0, "scale={scale} 瓦片过小 {r:?}");
+            }
+        }
+    }
+
+    /// 放大后缩放级别要变大（更细）。
     #[test]
     fn zoom_tracks_scale() {
-        // 3.3 m/px（scale≈0.3）在纬度 39 附近应落在 z15 左右
-        let map = MapState {
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let small = MapState {
             center: (38.9, 121.54),
             scale: 0.3,
             ..Default::default()
         };
-        let layer = TileLayer::new(true, "https://tile.openstreetmap.org/{z}/{x}/{y}.png", Datum::Wgs84);
-        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
-        let (z, keys) = layer.view(&map, rect).expect("view");
-        assert!((14..=16).contains(&z), "z={z}");
-        assert!(!keys.is_empty());
-        // 放大 4 倍应多两级左右
-        let map2 = MapState {
+        let big = MapState {
             center: (38.9, 121.54),
             scale: 1.2,
             ..Default::default()
         };
-        let (z2, _) = layer.view(&map2, rect).expect("view");
-        assert!(z2 > z, "z={z} z2={z2}");
+        let z_small = layer().visible(&small, rect)[0].0.z;
+        let z_big = layer().visible(&big, rect)[0].0.z;
+        assert!((14..=16).contains(&z_small), "z={z_small}");
+        assert!(z_big > z_small, "z={z_small} z_big={z_big}");
+    }
+
+    /// 子域占位符要被替换（高德那种 wprd0{1-4} 写法）。
+    #[test]
+    fn subdomain_placeholder_is_expanded() {
+        let layer = TileLayer::new(
+            true,
+            "https://wprd0{1-4}.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}",
+            Datum::Gcj02,
+        );
+        let key = Key { z: 17, x: 26, y: 41 };
+        let sub = (key.x + key.y) % 4 + 1;
+        let url = layer
+            .url_template
+            .replace("{1-4}", &sub.to_string())
+            .replace("{z}", &key.z.to_string())
+            .replace("{x}", &key.x.to_string())
+            .replace("{y}", &key.y.to_string());
+        assert_eq!(
+            url,
+            "https://wprd04.is.autonavi.com/appmaptile?x=26&y=41&z=17"
+        );
+        assert!(!url.contains('{'), "URL 还有没替换的占位符: {url}");
     }
 
     #[test]
