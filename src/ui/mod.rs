@@ -12,6 +12,7 @@ pub mod ai;
 pub mod data;
 pub mod device;
 pub mod fonts;
+pub mod jpeg_win;
 pub mod jobs;
 pub mod log;
 pub mod map;

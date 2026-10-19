@@ -21,7 +21,7 @@ use eframe::egui;
 /// 地图画布高度。
 const MAP_HEIGHT: f32 = 240.0;
 /// 画路线用的画布更高，方便画复杂线路。
-const DRAW_HEIGHT: f32 = 420.0;
+const DRAW_HEIGHT: f32 = 520.0;
 /// 校园范围在打卡点外接框外再留多少米。
 const CAMPUS_MARGIN_M: f64 = 150.0;
 
@@ -78,6 +78,8 @@ pub struct SimLocPage {
     pub campus: Option<[f64; 4]>,
     /// 是否锁定在校园范围内（配置项，界面可切）。
     pub campus_lock: bool,
+    /// 下次绘制画线画布时要一次性适配到的范围（「操场视图」用）。
+    pub route_target: Option<[f64; 4]>,
 }
 
 impl SimLocPage {
@@ -411,12 +413,6 @@ impl App {
                     format!("已加载 {loaded} · 加载中 {inflight} · 失败 {failed}"),
                 );
             });
-            if crate::ui::tiles::is_jpeg_style(&page.tiles.url_template) {
-                ui.colored_label(
-                    theme::warn(),
-                    "卫星底图是 JPEG，当前版本没有 JPEG 解码器 —— 请用「标准」底图",
-                );
-            }
             if let Some(note) = page.tiles.note.clone() {
                 ui.colored_label(theme::warn(), format!("底图异常：{note}"));
             }
@@ -430,6 +426,7 @@ impl App {
         let mut recenter = false;
         let mut recompute = false;
         let mut set_to_campus = false;
+        let mut zoom_playground = false;
         mobile::row(ui, |ui| {
             ui.label("校园范围：");
             let mut lock = page.campus_lock;
@@ -460,10 +457,28 @@ impl App {
             if ui.small_button("位置设到校园中心").clicked() {
                 set_to_campus = true;
             }
+            if ui
+                .small_button("操场视图")
+                .on_hover_text("放大到打卡点范围（约 200 m），方便细画路线")
+                .clicked()
+            {
+                zoom_playground = true;
+            }
         });
         if recenter {
             page.map_ready = false;
             page.route_map_ready = false;
+        }
+        if zoom_playground {
+            if page.points.is_empty() {
+                page.flash("没有打卡点缓存，先点「重新读取点位」", true);
+            } else {
+                page.route_target = crate::location::bbox_from_points(&page.points, 60.0);
+                page.route_map_ready = false;
+                page.route_fit_size = None;
+                page.mode = MapMode::Draw;
+                page.flash("已放大到操场范围，可直接画路线", false);
+            }
         }
         if set_to_campus {
             match page.campus {
@@ -901,6 +916,11 @@ impl App {
         );
 
         // 首次进入：视野对准打卡点与已画路线
+        if let Some(target) = page.route_target.take() {
+            page.route_map.fit_bounds(canvas, target);
+            page.route_map_ready = true;
+            page.route_fit_size = Some(canvas.size());
+        }
         let size_changed = page.route_fit_size != Some(canvas.size());
         let need_fit = !page.route_map_ready
             || (page.campus_lock && page.campus.is_some() && size_changed);

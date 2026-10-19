@@ -28,9 +28,14 @@ const TILE_UA: &str = "NekoSportsWorldTool/0.3.0 (+https://github.com/fhvbd/Neko
 
 /// 内置底图源：`(显示名, URL 模板, 坐标系)`。
 ///
-/// 只支持 PNG（本机无 JPEG 解码器）。国内网络访问 OSM 官方常被 DNS 污染，
-/// 所以默认用 CDN 上的 Carto（OSM 数据、带中文注记、许可要求署名）。
-pub const PRESETS: [(&str, &str, Datum); 4] = [
+/// PNG 用 `image` 解码，JPEG（卫星影像）走 Windows GDI+（见 `jpeg_win`）。
+/// 国内网络访问 OSM 官方常被 DNS 污染，所以路网图默认用高德。
+pub const PRESETS: [(&str, &str, Datum); 5] = [
+    (
+        "卫星 Esri（全球影像，画路线最清楚）",
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        Datum::Wgs84,
+    ),
     (
         "高德标准（中文路网，GCJ-02）",
         "https://webrd0{1-4}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}",
@@ -62,9 +67,24 @@ pub fn migrate_legacy_url(url: &str) -> Option<String> {
     None
 }
 
-/// 卫星底图（高德 `webst` / `style=6`）返回 JPEG，当前版本没有 JPEG 解码器。
-pub fn is_jpeg_style(url: &str) -> bool {
-    url.contains("webst") || url.contains("style=6") || url.contains("World_Imagery")
+/// 底图版权署名（不同源要求不同）。
+pub fn attribution(url: &str) -> &'static str {
+    if url.contains("arcgisonline") {
+        "© Esri, Maxar, Earthstar Geographics"
+    } else if url.contains("openstreetmap") {
+        "© OpenStreetMap contributors"
+    } else if url.contains("cartocdn") {
+        "© OpenStreetMap contributors © CARTO"
+    } else if url.contains("autonavi") {
+        "© 高德地图"
+    } else {
+        "在线底图"
+    }
+}
+
+/// 失败记录 + 计数（失败多了会重试，见 [`TileLayer::request`]）。
+fn mark_failed_inner(failed: &mut std::collections::HashSet<Key>, key: Key) {
+    failed.insert(key);
 }
 
 /// 当前模板对应哪个预设（用于下拉框回显）。
@@ -186,16 +206,17 @@ impl TileLayer {
             painter.text(
                 egui::pos2(rect.right() - 6.0, rect.bottom() - 4.0),
                 egui::Align2::RIGHT_BOTTOM,
-                if self.url_template.contains("openstreetmap") {
-                    "© OpenStreetMap contributors"
-                } else {
-                    "在线底图"
-                },
+                attribution(&self.url_template),
                 egui::FontId::proportional(10.0),
                 Color32::from_rgb(120, 130, 126),
             );
         }
         painted
+    }
+
+    /// 记一次失败（同一张瓦片不再反复请求）。
+    fn mark_failed(&mut self, key: Key) {
+        mark_failed_inner(&mut self.failed, key);
     }
 
     /// `(已加载, 请求中, 失败)`，界面用来提示底图状态。
@@ -319,12 +340,8 @@ impl TileLayer {
         while let Ok((key, res)) = self.rx.try_recv() {
             self.inflight.remove(&key);
             match res {
-                Ok(bytes) => match image::load_from_memory(&bytes) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let size = [rgba.width() as usize, rgba.height() as usize];
-                        let pixels = rgba.into_raw();
-                        let color = ColorImage::from_rgba_unmultiplied(size, &pixels);
+                Ok(bytes) => match decode_tile(&bytes) {
+                    Ok(color) => {
                         let tex = ctx.load_texture(
                             format!("tile-{}-{}-{}", key.z, key.x, key.y),
                             color,
@@ -333,14 +350,12 @@ impl TileLayer {
                         self.tiles.insert(key, Tile::Ready(tex));
                     }
                     Err(e) => {
-                        self.failed.insert(key);
-                        self.note.get_or_insert_with(|| {
-                            format!("底图解码失败（当前只支持 PNG 瓦片）: {e}")
-                        });
+                        self.mark_failed(key);
+                        self.note.get_or_insert(e);
                     }
                 },
                 Err(e) => {
-                    self.failed.insert(key);
+                    self.mark_failed(key);
                     self.note.get_or_insert(e);
                 }
             }
@@ -349,6 +364,25 @@ impl TileLayer {
         if self.tiles.len() > MAX_TILES_TOTAL * 2 {
             self.tiles.clear();
         }
+    }
+}
+
+/// 瓦片字节 → RGBA：PNG 用 `image`，JPEG 走 Windows GDI+。
+fn decode_tile(bytes: &[u8]) -> Result<ColorImage, String> {
+    let is_jpeg = bytes.len() > 3 && bytes[0] == 0xFF && bytes[1] == 0xD8;
+    if !is_jpeg {
+        let img = image::load_from_memory(bytes).map_err(|e| format!("底图解码失败: {e}"))?;
+        let rgba = img.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        return Ok(ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw()));
+    }
+    #[cfg(windows)]
+    {
+        crate::ui::jpeg_win::decode(bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        Err("JPEG 瓦片需要 Windows GDI+ 解码，当前平台不支持".into())
     }
 }
 
