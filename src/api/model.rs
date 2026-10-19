@@ -80,6 +80,19 @@ pub struct Config {
     /// 路线算法：legacy | road。
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
+    /// 用户自定的模拟位置；启用时覆盖设备信息页的定位锚点。
+    #[serde(default)]
+    pub sim_location: Option<crate::location::SimLocation>,
+    /// 收藏的模拟位置（GUI 与 CLI 共用同一份）。
+    #[serde(default)]
+    pub sim_favorites: Vec<crate::location::SimLocation>,
+}
+
+impl Config {
+    /// 已启用的模拟位置；None 表示沿用设备信息页的定位锚点。
+    pub fn active_sim(&self) -> Option<&crate::location::SimLocation> {
+        self.sim_location.as_ref().filter(|sim| sim.enabled)
+    }
 }
 
 fn default_route_mode() -> String {
@@ -123,6 +136,8 @@ impl Default for Config {
             update_check: default_update_check(),
             osm_path: String::new(),
             route_mode: default_route_mode(),
+            sim_location: None,
+            sim_favorites: Vec::new(),
         }
     }
 }
@@ -419,6 +434,20 @@ pub fn save_points_cache(
         points: points.to_vec(),
     };
     write_json("points_cache.json", &doc)
+}
+
+/// 不校验锚点地读取缓存的打卡点：模拟位置页用它画出学校点位分布。
+pub fn load_points_cache_any() -> Option<Vec<serde_json::Value>> {
+    let v: serde_json::Value = read_json("points_cache.json")?;
+    let cache: PointsCache = serde_json::from_value(v).ok()?;
+    (!cache.points.is_empty()).then_some(cache.points)
+}
+
+/// 缓存点位对应的锚点（「对齐到学校中心」等操作参考）。
+pub fn cached_points_anchor() -> Option<crate::location::Coordinate> {
+    let v: serde_json::Value = read_json("points_cache.json")?;
+    let cache: PointsCache = serde_json::from_value(v).ok()?;
+    Some(cache.anchor)
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
         "login" => cmd_login(&rest),
         "logout" => cmd_logout(),
         "run" => cmd_run(&rest),
+        "location" | "loc" => cmd_location(&rest),
         "template" => cmd_template(&rest),
         "ai" => cmd_ai(&rest),
         "ai-list" => cmd_ai_list(),
@@ -126,6 +127,8 @@ fn cmd_run(rest: &[&str]) -> i32 {
     let route_mode = crate::track::generate_road::RouteMode::from_str(
         get(&flags, "route").unwrap_or(&cfg.route_mode),
     );
+    // 模拟位置：config.json 里启用即生效（与 GUI 共用），run 无需额外参数。
+    let sim = cfg.active_sim().cloned();
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
@@ -168,6 +171,9 @@ fn cmd_run(rest: &[&str]) -> i32 {
     );
 
     let mut log = logger();
+    if let Some(sim) = &sim {
+        println!("模拟位置：{}", sim.summary());
+    }
     let params = crate::api::flow::RunParams {
         dist,
         dur,
@@ -177,6 +183,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
         manual_altitude_range,
         seed,
         route_mode,
+        sim,
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
@@ -192,6 +199,217 @@ fn cmd_run(rest: &[&str]) -> i32 {
         Err(e) => {
             eprintln!("跑步提交失败: {e}");
             1
+        }
+    }
+}
+
+/// 模拟位置子命令：show / set / on / off / clear / save / use / rm / list。
+///
+/// 与 GUI「模拟位置」页共用 config.json：CLI 设过之后 `run` 直接生效，
+/// 反之 GUI 里设的位置也能被定时任务沿用。
+fn cmd_location(rest: &[&str]) -> i32 {
+    let mut flags = parse_flags(rest);
+    // 兼容 --lat=-12.3 写法：parse_flags 会把回退后的 -12.3 当成新的 flag 名。
+    let equals: Vec<(String, String)> = flags
+        .iter()
+        .filter(|(_, value)| value == "1")
+        .filter_map(|(key, _)| {
+            key.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect();
+    flags.extend(equals);
+    let action = flags.first().map(|(k, _)| k.as_str()).unwrap_or("show");
+    // `location save 操场` 里的位置参数（跳过动作词本身）。
+    let positional = rest
+        .iter()
+        .skip(1)
+        .find(|t| !t.starts_with('-'))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut cfg = model::load_config();
+    match action {
+        "show" | "list" => {
+            print_location(&cfg);
+            0
+        }
+        "set" => {
+            let (Some(lat), Some(lon)) = (
+                get(&flags, "lat").and_then(|v| v.parse::<f64>().ok()),
+                get(&flags, "lon").and_then(|v| v.parse::<f64>().ok()),
+            ) else {
+                eprintln!(
+                    "缺少 --lat / --lon（例如 location set --lat 38.901678 --lon 121.540241）"
+                );
+                return 1;
+            };
+            let datum = match get(&flags, "datum") {
+                Some(text) => match crate::location::Datum::parse(text) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                },
+                None => crate::location::Datum::Bd09,
+            };
+            let mut sim = match crate::location::SimLocation::new(lat, lon, datum) {
+                Ok(sim) => sim,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
+            sim.city = get(&flags, "city").unwrap_or("").trim().to_string();
+            // 备注名只认 --label：positional 在 `--key value` 写法下会误取到值
+            sim.label = get(&flags, "label").unwrap_or("").trim().to_string();
+            if let Err(e) = sim.anchor() {
+                eprintln!("{e}");
+                return 1;
+            }
+            cfg.sim_location = Some(sim);
+            if let Err(e) = model::save_config(&cfg) {
+                eprintln!("保存失败: {e}");
+                return 1;
+            }
+            println!("√ 模拟位置已启用");
+            print_location(&cfg);
+            0
+        }
+        "on" | "off" => {
+            let Some(mut sim) = cfg.sim_location.clone() else {
+                eprintln!("尚未设置模拟位置，先执行 location set --lat .. --lon ..");
+                return 1;
+            };
+            sim.enabled = action == "on";
+            cfg.sim_location = Some(sim);
+            if let Err(e) = model::save_config(&cfg) {
+                eprintln!("保存失败: {e}");
+                return 1;
+            }
+            println!(
+                "{}",
+                if action == "on" {
+                    "√ 已启用模拟位置（run 将不再使用设备信息页锚点）"
+                } else {
+                    "√ 已停用模拟位置（run 回到设备信息页锚点）"
+                }
+            );
+            0
+        }
+        "clear" => {
+            cfg.sim_location = None;
+            if let Err(e) = model::save_config(&cfg) {
+                eprintln!("保存失败: {e}");
+                return 1;
+            }
+            println!("√ 已清除模拟位置（收藏保留）");
+            0
+        }
+        "save" => {
+            let Some(sim) = cfg.active_sim().cloned() else {
+                eprintln!("当前没有启用的模拟位置，先执行 location set");
+                return 1;
+            };
+            let name = positional
+                .or_else(|| (!sim.label.trim().is_empty()).then(|| sim.label.clone()))
+                .or_else(|| (!sim.city.trim().is_empty()).then(|| sim.city.clone()))
+                .unwrap_or_else(|| format!("{:.6},{:.6}", sim.lat, sim.lon));
+            let mut entry = sim;
+            entry.label = name.clone();
+            cfg.sim_favorites.retain(|f| f.label != name);
+            cfg.sim_favorites.push(entry);
+            if let Err(e) = model::save_config(&cfg) {
+                eprintln!("保存失败: {e}");
+                return 1;
+            }
+            println!("√ 已收藏「{name}」");
+            0
+        }
+        "use" => {
+            let Some(name) = positional else {
+                eprintln!("缺少收藏名：location use <名称>（location 查看收藏列表）");
+                return 1;
+            };
+            let Some(found) = cfg.sim_favorites.iter().find(|f| f.label == name).cloned() else {
+                eprintln!("没有名为「{name}」的收藏：location 查看列表");
+                return 1;
+            };
+            let mut applied = found;
+            applied.enabled = true;
+            cfg.sim_location = Some(applied);
+            if let Err(e) = model::save_config(&cfg) {
+                eprintln!("保存失败: {e}");
+                return 1;
+            }
+            println!("√ 已应用收藏「{name}」");
+            print_location(&cfg);
+            0
+        }
+        "rm" => {
+            let Some(name) = positional else {
+                eprintln!("缺少收藏名：location rm <名称>");
+                return 1;
+            };
+            let before = cfg.sim_favorites.len();
+            cfg.sim_favorites.retain(|f| f.label != name);
+            if cfg.sim_favorites.len() == before {
+                eprintln!("没有名为「{name}」的收藏");
+                return 1;
+            }
+            if let Err(e) = model::save_config(&cfg) {
+                eprintln!("保存失败: {e}");
+                return 1;
+            }
+            println!("√ 已删除收藏「{name}」");
+            0
+        }
+        other => {
+            eprintln!("未知的 location 子命令: {other}");
+            super::usage();
+            1
+        }
+    }
+}
+
+/// 打印当前模拟位置（含三套基准换算）与收藏列表。
+fn print_location(cfg: &model::Config) {
+    match cfg.active_sim() {
+        Some(sim) => {
+            println!("模拟位置：已启用 → {}", sim.summary());
+            match sim.point_in(crate::location::Datum::Bd09) {
+                Ok(bd) => println!("  BD-09（协议基准）  {:.6}, {:.6}", bd.0, bd.1),
+                Err(e) => println!("  坐标无效：{e}"),
+            }
+            if let Ok(g) = sim.point_in(crate::location::Datum::Gcj02) {
+                println!("  GCJ-02（高德）     {:.6}, {:.6}", g.0, g.1);
+            }
+            if let Ok(w) = sim.point_in(crate::location::Datum::Wgs84) {
+                println!("  WGS84（GPS）       {:.6}, {:.6}", w.0, w.1);
+            }
+            println!(
+                "  城市：{}",
+                if sim.city.trim().is_empty() {
+                    "（空，沿用设备信息页城市）".to_string()
+                } else {
+                    sim.city.trim().to_string()
+                }
+            );
+            println!("  跑步时不再自动漂移锚点（漂移会改掉这里的选择）");
+        }
+        None => {
+            println!("模拟位置：未启用（run 使用设备信息页的定位锚点）");
+            if let Some(sim) = &cfg.sim_location {
+                println!("  已保存但处于停用状态：{}", sim.summary());
+            }
+        }
+    }
+    if cfg.sim_favorites.is_empty() {
+        println!("收藏：无");
+    } else {
+        println!("收藏：");
+        for f in &cfg.sim_favorites {
+            println!("  - {}", f.summary());
         }
     }
 }

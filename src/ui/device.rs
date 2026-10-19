@@ -42,7 +42,7 @@ impl App {
                                 info.manufacturer, info.model, info.os_version);
                         }
                         Err(error) => {
-                            self.tab = 5;
+                            self.tab = super::TAB_DEVICE;
                             self.status = format!("× 保存失败：{error}，请在设备页重新保存");
                         }
                     }
@@ -150,6 +150,10 @@ impl App {
             theme::text_dim(),
             "修改城市或定位锚点后，请点击“保存”；跑步流程只使用已保存的身份信息。",
         );
+        ui.colored_label(
+            theme::text_dim(),
+            "只是想改“这次在哪跑”：用「模拟位置」页\n（支持 WGS84/GCJ-02/BD-09 换算、地图取点、收藏），不必动这里的设备锚点。",
+        );
         if location_fields_changed(&self.identity, &self.device_buf) {
             ui.colored_label(
                 theme::warn(),
@@ -166,6 +170,8 @@ impl App {
                         self.status = "√ 设备身份已保存并生效".into();
                         self.log.push("√  已更新（新设备 ID 从下个请求开始生效）");
                         page.saved_flash = 2.0;
+                        // 定位锚点可能变了：路线预览要按新锚点重算
+                        self.invalidate_run_preview();
                     }
                     Err(e) => self.status = format!("× 保存失败：{e}"),
                 }
@@ -201,7 +207,7 @@ impl App {
         if self.identity.has_unconfigured_default_location() {
             ui.colored_label(
                 theme::warn(),
-                "运行前请填写实际城市和定位锚点；默认大连配置不会用于提交",
+                "运行前请填写实际城市和定位锚点（或到「模拟位置」页设定坐标）；默认大连配置不会用于提交",
             );
         }
         if page.saved_flash > 0.0 {

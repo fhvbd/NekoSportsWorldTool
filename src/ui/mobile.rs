@@ -65,18 +65,21 @@ fn parse_f64_in_range(input: &str, range: RangeInclusive<f64>) -> Result<f64, St
     }
 }
 
+/// 标签页标题（下标即 `App::tab`，与 `ui::mod` 的 TAB_* 常量顺序一致）。
+const TABS: [&str; 10] = [
+    "跑步",
+    "AI运动",
+    "运动记录",
+    "数据",
+    "我的",
+    "设备信息",
+    "模拟位置",
+    "运行日志",
+    "路网",
+    "关于",
+];
+
 pub fn tab_bar(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
-    const TABS: [&str; 9] = [
-        "跑步",
-        "AI运动",
-        "运动记录",
-        "数据",
-        "我的",
-        "设备信息",
-        "运行日志",
-        "路网",
-        "关于",
-    ];
     let compact = compact_ui(ui);
     let mut responses = Vec::with_capacity(TABS.len());
     if compact {
@@ -380,7 +383,7 @@ mod tests {
                 });
             });
 
-            assert_eq!(rects.len(), 9, "width={width}");
+            assert_eq!(rects.len(), TABS.len(), "width={width}");
             assert!(rects
                 .iter()
                 .all(|rect| rect.is_finite() && rect.width() > 0.0));

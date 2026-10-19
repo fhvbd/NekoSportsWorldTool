@@ -23,6 +23,14 @@ fn usage() {
   logout                                   登出并清理本地会话
   run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
                                            跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法）
+  location [show]                          显示模拟位置（含 WGS84/GCJ-02/BD-09 换算）与收藏
+  location set --lat <纬度> --lon <经度> [--datum wgs84|gcj02|bd09] [--city 城市] [--label 备注]
+                                           设置并启用模拟位置；run 改用它拉取打卡点
+  location on|off                          启用 / 停用模拟位置
+  location clear                           清除模拟位置（收藏保留）
+  location save <名称>                     把当前模拟位置存为收藏
+  location use <名称>                      应用收藏
+  location rm <名称>                       删除收藏
   template --file <GPX/JSON>                本地读取真实记录，分析海拔（不会上传）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]
@@ -38,7 +46,8 @@ fn usage() {
   rank   history --sort 1|2 [--gender 0|1] 历史榜
   update [--check]                        检查更新；默认下载并自替换（--check 仅检查）
 
-当天榜单通常在有效里程产生后才有数据；run 默认随机 1.0~1.5 km / 6~8 分配速 / 30-300 分钟前。"#
+当天榜单通常在有效里程产生后才有数据；run 默认随机 1.0~1.5 km / 6~8 分配速 / 30-300 分钟前。
+启用模拟位置后，run 的定位锚点取 location 设置的点，且不再按打卡点随机漂移。"#
     );
 }
 

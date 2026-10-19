@@ -76,6 +76,17 @@ impl MapState {
         )
     }
 
+    /// 屏幕坐标 → 度坐标（`to_screen` 的逆，地图点选取点用）。
+    pub fn from_screen(&self, rect: Rect, pos: Pos2) -> (f64, f64) {
+        let c = rect.center();
+        let x = (pos.x as f64 - c.x as f64 - self.offset.x as f64) / self.scale.max(1e-6) as f64;
+        let y = -(pos.y as f64 - c.y as f64 - self.offset.y as f64) / self.scale.max(1e-6) as f64;
+        (
+            self.center.0 + y / MET_PER_DEG_LAT,
+            self.center.1 + x / MET_PER_DEG_LNG,
+        )
+    }
+
     /// 处理拖拽/缩放交互（需在分配好 rect 后调用）。
     pub fn interact(&mut self, ui: &egui::Ui, rect: Rect) {
         self.dragged = false;

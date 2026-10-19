@@ -199,6 +199,69 @@ pub fn wgs84_to_bd09(lat: f64, lng: f64) -> (f64, f64) {
     gcj02_to_bd09(g_lat, g_lng)
 }
 
+/// GCJ-02 → WGS84（`wgs84_to_gcj02` 的数值逆，迭代到 1e-9 度以内）。
+///
+/// 正向变换无闭式逆，这里用不动点迭代：每轮用当前估计值正变换，
+/// 与目标的残差回减。境内偏移量级为 1e-3 度，3~4 轮即收敛。
+pub fn gcj02_to_wgs84(gcj_lat: f64, gcj_lng: f64) -> (f64, f64) {
+    if out_of_china(gcj_lat, gcj_lng) {
+        return (gcj_lat, gcj_lng);
+    }
+    let (mut lat, mut lng) = (gcj_lat, gcj_lng);
+    for _ in 0..16 {
+        let (t_lat, t_lng) = wgs84_to_gcj02(lat, lng);
+        let (d_lat, d_lng) = (t_lat - gcj_lat, t_lng - gcj_lng);
+        if d_lat.abs() < 1e-10 && d_lng.abs() < 1e-10 {
+            break;
+        }
+        lat -= d_lat;
+        lng -= d_lng;
+    }
+    (lat, lng)
+}
+
+/// BD-09 → WGS84（百度坐标直转 GPS 原始坐标，供用户对照手机地图）。
+pub fn bd09_to_wgs84(bd_lat: f64, bd_lng: f64) -> (f64, f64) {
+    let (g_lat, g_lng) = super::wire::bd09_to_gcj02(bd_lat, bd_lng);
+    gcj02_to_wgs84(g_lat, g_lng)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 三套基准互转：往返误差应在毫米级（1e-6 度 ≈ 0.1 m）。
+    #[test]
+    fn datum_roundtrips() {
+        let bd = (38.901678, 121.540241);
+        let (g_lat, g_lng) = super::super::wire::bd09_to_gcj02(bd.0, bd.1);
+        let (w_lat, w_lng) = gcj02_to_wgs84(g_lat, g_lng);
+        // GCJ → WGS 为正变换的数值逆
+        let (back_lat, back_lng) = wgs84_to_gcj02(w_lat, w_lng);
+        assert!(
+            (back_lat - g_lat).abs() < 1e-9,
+            "lat={back_lat} 期望 {g_lat}"
+        );
+        assert!(
+            (back_lng - g_lng).abs() < 1e-9,
+            "lng={back_lng} 期望 {g_lng}"
+        );
+        // BD → WGS → BD 闭合
+        let (bd_lat, bd_lng) = wgs84_to_bd09(w_lat, w_lng);
+        assert!((bd_lat - bd.0).abs() < 1e-6, "lat={bd_lat} 期望 {}", bd.0);
+        assert!((bd_lng - bd.1).abs() < 1e-6, "lng={bd_lng} 期望 {}", bd.1);
+        // BD → WGS 直转与分步一致
+        let (d_lat, d_lng) = bd09_to_wgs84(bd.0, bd.1);
+        assert!((d_lat - w_lat).abs() < 1e-12 && (d_lng - w_lng).abs() < 1e-12);
+    }
+
+    /// 境外坐标不做偏移（避免海外用户被强行平移）。
+    #[test]
+    fn outside_china_is_identity() {
+        assert_eq!(gcj02_to_wgs84(48.8566, 2.3522), (48.8566, 2.3522));
+    }
+}
+
 pub fn fmt_gain_time(ms: i64) -> String {
     Local
         .timestamp_millis_opt(ms)

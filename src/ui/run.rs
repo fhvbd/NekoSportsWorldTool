@@ -400,6 +400,62 @@ impl App {
             });
         }
 
+        // 模拟位置：这一行只做展示 + 跳转，真正的取值在提交时读 config。
+        let mut open_location = false;
+        let mut disable_location = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("模拟位置：");
+            match self.config.active_sim() {
+                Some(sim) => match sim.anchor() {
+                    Ok(anchor) => {
+                        ui.colored_label(
+                            theme::ok(),
+                            format!(
+                                "已固定「{}」→ ({:.6},{:.6}) BD-09",
+                                sim.short_name(),
+                                anchor.latitude,
+                                anchor.longitude
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        ui.colored_label(theme::err(), format!("模拟位置无效：{e}"));
+                    }
+                },
+                None => {
+                    ui.colored_label(
+                        theme::text_dim(),
+                        format!(
+                            "未启用（设备锚点 {:.6},{:.6}）",
+                            self.identity.anchor_lat, self.identity.anchor_lon
+                        ),
+                    );
+                }
+            }
+            if ui.small_button("设置位置").clicked() {
+                open_location = true;
+            }
+            if self.config.active_sim().is_some() && ui.small_button("停用").clicked() {
+                disable_location = true;
+            }
+        });
+        if open_location {
+            self.tab = super::TAB_LOCATION;
+        }
+        if disable_location {
+            if let Some(mut sim) = self.config.sim_location.clone() {
+                sim.enabled = false;
+                self.config.sim_location = Some(sim.clone());
+                match crate::api::model::save_config(&self.config) {
+                    Ok(()) => self.status = "已停用模拟位置，改用设备信息页锚点".into(),
+                    Err(e) => self.status = format!("保存失败：{e}"),
+                }
+                // 模拟位置页有自己的缓冲区，同步一下免得开关状态对不上
+                self.sim_loc_page.load(&sim);
+                self.invalidate_run_preview();
+            }
+        }
+
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
         if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
             self.refresh_fence();
@@ -463,6 +519,22 @@ impl App {
     /// 开始时间相关的提示。须在 `ensure_plan()` 之后调用，才对得上本次提交时刻。
     fn draw_run_warnings(&self, ui: &mut egui::Ui) {
         let page = &self.run_page;
+        if let Some(sim) = self.config.active_sim() {
+            if sim.city.trim().is_empty() {
+                ui.colored_label(
+                    theme::warn(),
+                    "模拟位置没填城市：address 会沿用设备信息页的城市，可能对不上",
+                );
+            }
+            if sim.anchor().is_err() {
+                ui.colored_label(theme::warn(), "模拟位置坐标无效，请到「模拟位置」页修正");
+            }
+        } else if self.identity.has_unconfigured_default_location() {
+            ui.colored_label(
+                theme::warn(),
+                "还没设定位置：请到「模拟位置」页填坐标，或在设备信息页填锚点",
+            );
+        }
         if page.start_mode == 0 {
             if !page.random_window_ok() {
                 ui.colored_label(
@@ -515,11 +587,11 @@ impl App {
             self.run_page.preview = None;
             self.run_page.map_fitted = false;
             self.run_page.preview_stale = false;
-            // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
+            // 点位缓存按锚点隔离（main 的串城市防护）；锚点取「模拟位置优先」，与提交时一致
             let cached = self
-                .identity
-                .anchor_coordinate()
+                .effective_anchor()
                 .ok()
+                .flatten()
                 .and_then(crate::api::model::load_points_cache_for);
             if let Some((_ts, pts)) = cached {
                 let pts_bd = crate::api::points::points_bd(&pts);
@@ -722,6 +794,8 @@ impl App {
         let _ = crate::api::model::save_config(&self.config);
 
         let identity = self.identity.clone();
+        // 模拟位置：启用时覆盖设备锚点（flow 内部据此跳过锚点漂移）。
+        let sim = self.config.active_sim().cloned();
         let session = match self.session.clone() {
             Some(s) => s,
             None => {
@@ -744,6 +818,7 @@ impl App {
                 manual_altitude_range,
                 seed,
                 route_mode,
+                sim,
             };
             let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
                 Ok(out) => {

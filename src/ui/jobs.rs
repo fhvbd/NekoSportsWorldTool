@@ -27,7 +27,7 @@ impl App {
         self.update.checking = true;
         self.update.check_error = None;
         if manual {
-            self.tab = 8;
+            self.tab = super::TAB_ABOUT;
             self.status = "正在检查更新…".into();
         }
         self.spawn_job(move |tx| {
@@ -82,7 +82,7 @@ impl App {
 
     /// 后台拉取电子围栏并落盘（供预览裁剪/居中复用），完成后触发预览刷新。
     /// 仅在真实道路路由模式下才需要围栏，避免经典模式用户也进入该端点请求指纹。
-    pub(crate) fn refresh_fence(&self) {
+    pub(crate) fn refresh_fence(&mut self) {
         if self.run_page.route_mode != RouteMode::Road {
             return;
         }
@@ -105,8 +105,8 @@ impl App {
     }
 
     /// 后台拉取实时点位并落盘（供路线预览使用），完成后触发预览刷新。
-    /// 复用 fetch_points 的 TTL 缓存，仅在 Road 模式且锚点已配置时拉取。
-    pub(crate) fn refresh_points(&self) {
+    /// 复用 fetch_points 的 TTL 缓存，仅在 Road 模式且已配置定位（模拟位置或设备锚点）时拉取。
+    pub(crate) fn refresh_points(&mut self) {
         if self.run_page.route_mode != RouteMode::Road {
             return;
         }
@@ -114,18 +114,34 @@ impl App {
             return;
         };
         let identity = self.identity.clone();
-        if identity.has_unconfigured_default_location() {
-            return;
-        }
-        let Ok(anchor) = identity.anchor_coordinate() else {
-            return;
+        let sim = self.config.active_sim().cloned();
+        let anchor = match &sim {
+            Some(sim) => match sim.anchor() {
+                Ok(anchor) => anchor,
+                Err(e) => {
+                    self.status = format!("模拟位置无效：{e}");
+                    return;
+                }
+            },
+            None => {
+                if identity.has_unconfigured_default_location() {
+                    return;
+                }
+                match identity.anchor_coordinate() {
+                    Ok(anchor) => anchor,
+                    Err(_) => return,
+                }
+            }
         };
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
             match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
                 Ok(pts) => {
-                    log(&format!("√ [points] 点位已缓存 {} 个（供路线预览）", pts.len()));
+                    log(&format!(
+                        "√ [points] 点位已缓存 {} 个（供路线预览）",
+                        pts.len()
+                    ));
                     tx.send(POINTS_DONE.to_string()).ok();
                 }
                 Err(e) => log(&format!("⚠ [points] 点位获取失败: {e}")),

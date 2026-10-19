@@ -20,6 +20,7 @@ pub mod msgs;
 pub mod osm;
 pub mod records;
 pub mod run;
+pub mod simloc;
 pub mod theme;
 pub mod user;
 
@@ -46,6 +47,18 @@ pub const UPDATE_PROG: &str = "__UPDATE_PROG__";
 pub const UPDATE_DONE: &str = "__UPDATE_DONE__";
 pub const FENCE_DONE: &str = "__FENCE_DONE__";
 pub const POINTS_DONE: &str = "__POINTS_DONE__";
+
+/// 标签页下标（与 `mobile::tab_bar` 的 TABS 顺序一致）。
+pub const TAB_RUN: usize = 0;
+pub const TAB_AI: usize = 1;
+pub const TAB_RECORDS: usize = 2;
+pub const TAB_DATA: usize = 3;
+pub const TAB_USER: usize = 4;
+pub const TAB_DEVICE: usize = 5;
+pub const TAB_LOCATION: usize = 6;
+pub const TAB_LOG: usize = 7;
+pub const TAB_OSM: usize = 8;
+pub const TAB_ABOUT: usize = 9;
 
 /// 提交结果弹窗。
 pub struct PopupInfo {
@@ -86,6 +99,7 @@ pub struct App {
     pub data_page: data::DataPage,
     pub user_page: user::UserPage,
     pub device_page: device::DevicePage,
+    pub sim_loc_page: simloc::SimLocPage,
     pub update: about::UpdateUi,
 
     /// 已加载的 OSM 路网（真实道路路由 + 地图显示共用）。
@@ -268,14 +282,15 @@ impl eframe::App for App {
             mobile::tab_bar(ui, &mut self.tab);
             ui.separator();
             match self.tab {
-                0 => self.draw_run(ui),
-                1 => self.draw_ai(ui),
-                2 => self.draw_records(ui),
-                3 => self.draw_data(ui),
-                4 => self.draw_user(ui),
-                5 => self.draw_device(ui),
-                6 => self.log.render(ui),
-                7 => self.draw_osm_page(ui),
+                TAB_RUN => self.draw_run(ui),
+                TAB_AI => self.draw_ai(ui),
+                TAB_RECORDS => self.draw_records(ui),
+                TAB_DATA => self.draw_data(ui),
+                TAB_USER => self.draw_user(ui),
+                TAB_DEVICE => self.draw_device(ui),
+                TAB_LOCATION => self.draw_sim_location(ui),
+                TAB_LOG => self.log.render(ui),
+                TAB_OSM => self.draw_osm_page(ui),
                 _ => self.draw_about(ui),
             }
         });
@@ -376,6 +391,7 @@ impl App {
             data_page: data::DataPage::default(),
             user_page: user::UserPage::default(),
             device_page: device::DevicePage::default(),
+            sim_loc_page: simloc::SimLocPage::from_config(&config),
             update: about::UpdateUi::default(),
             network: None,
             osm_page: osm::OsmPage {
@@ -431,5 +447,24 @@ impl App {
         move |s: &str| {
             tx.send(s.to_string()).ok();
         }
+    }
+
+    /// 定位变了（模拟位置 / 设备锚点）→ 路线预览必须重算：锚点决定拉哪批打卡点。
+    pub fn invalidate_run_preview(&mut self) {
+        self.run_page.preview = None;
+        self.run_page.preview_stale = true;
+        self.run_page.map_fitted = false;
+    }
+
+    /// 本次跑步使用的定位锚点：已启用的模拟位置优先，其次设备信息页锚点。
+    ///
+    /// `Ok(None)` 表示两处都没配好（设备页仍是默认值且没有模拟位置）；
+    /// `Err` 表示配置了但坐标非法，调用方应提示用户而不是静默回退。
+    pub fn effective_anchor(&self) -> Result<Option<crate::location::Coordinate>, String> {
+        if let Some(sim) = self.config.active_sim() {
+            return sim.anchor().map(Some);
+        }
+        let anchor = self.identity.anchor_coordinate()?;
+        Ok((!self.identity.has_unconfigured_default_location()).then_some(anchor))
     }
 }

@@ -14,7 +14,7 @@ use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
 use rand_distr::{Distribution, Normal};
 use serde_json::Value;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RunParams {
     /// 距离（米）与时长（秒）已由 UI 参数解析。
     pub dist: f64,
@@ -29,6 +29,8 @@ pub struct RunParams {
     pub seed: u64,
     /// 路线算法模式。
     pub route_mode: RouteMode,
+    /// 用户自定的模拟位置：启用时覆盖设备信息页锚点，且本次不再自动漂移锚点。
+    pub sim: Option<crate::location::SimLocation>,
 }
 
 pub struct RunOutcome {
@@ -60,13 +62,36 @@ pub fn run_full_flow(
 
     // ② 实时点位（拒绝本地样本兜底）
     log("[points] 拉取实时点位…");
-    if client.identity.has_unconfigured_default_location() {
-        return Err("请先在设备信息页填写本次跑步所在城市和定位锚点，不能使用大连默认配置".into());
-    }
-    let anchor: Coordinate = client.identity.anchor_coordinate()?;
+    // 模拟位置优先：用户自己指定的锚点压过设备信息页，且不再走「打卡点随机漂移」。
+    let sim = params.sim.clone().filter(|s| s.enabled);
+    let anchor: Coordinate = match &sim {
+        Some(sim) => {
+            let anchor = sim.anchor()?;
+            log(&format!(
+                "√ [points] 使用模拟位置 {} → BD=({:.6},{:.6})，本次不改写设备锚点",
+                sim.summary(),
+                anchor.latitude,
+                anchor.longitude
+            ));
+            anchor
+        }
+        None => {
+            if client.identity.has_unconfigured_default_location() {
+                return Err(
+                    "请先在设备信息页填写本次跑步所在城市和定位锚点，或在「模拟位置」页设置自定义位置"
+                        .into(),
+                );
+            }
+            client.identity.anchor_coordinate()?
+        }
+    };
     let pts = points::fetch_points(client, anchor, log)?;
     if pts.is_empty() {
-        return Err("实时点位为空 —— 拒绝本地样本兜底".into());
+        return Err(if sim.is_some() {
+            "实时点位为空 —— 模拟位置多半不在学校范围内；坐标基准选错会偏 300~600 米，请核对".into()
+        } else {
+            "实时点位为空 —— 拒绝本地样本兜底".into()
+        });
     }
     log(&format!("√ [points] {} 个点位", pts.len()));
     for p in pts.iter().take(5) {
@@ -120,8 +145,9 @@ pub fn run_full_flow(
     if let Some(&(slat, slon)) = route_pts.first() {
         log(&format!("√ [track] 起点 BD=({slat:.6},{slon:.6})"));
     }
-    // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
-    if !pts_bd.is_empty() {
+    // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值。
+    // 用户固定了模拟位置时不漂移——否则等于每次把用户的选择改掉。
+    if sim.is_none() && !pts_bd.is_empty() {
         let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
         let (clat, clng) = pts_bd[idx];
         let mut rng = rand::thread_rng();
@@ -141,7 +167,7 @@ pub fn run_full_flow(
         }
     }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
-    let mut params = *params;
+    let mut params = params.clone();
     let avg = params.dist / params.dur as f64;
     let fixed_avg = avg.clamp(
         crate::track::generator::SPEED_FLOOR + 0.1,
@@ -286,6 +312,11 @@ pub fn run_full_flow(
 
     // ⑤ 提交（sportType=1）
     log("[record] 提交跑步记录（sportType=1）…");
+    // 模拟位置可以自带城市名（异地跑步时 address 必须跟着走）；否则沿用设备城市。
+    let address = match &sim {
+        Some(sim) if !sim.city.trim().is_empty() => sim.city.trim().to_string(),
+        _ => client.identity.city.clone(),
+    };
     let sp = SubmitParams {
         track,
         uid: sess.uid,
@@ -296,7 +327,7 @@ pub fn run_full_flow(
         weight: if sess.weight > 0.0 { sess.weight } else { 68.0 },
         face_check: params.face_check,
         five_point_json: five,
-        address: client.identity.city.clone(),
+        address,
     };
     let result = submit_record(client, &sp, log)?;
     sleep_secs(1);
