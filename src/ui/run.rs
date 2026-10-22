@@ -1125,10 +1125,12 @@ mod tests {
             .unwrap()
             .timestamp_millis();
         let now_ms = crate::crypto::envelope::now_ms();
-        assert_eq!(
-            plan.start_ms,
-            want.min(now_ms),
-            "指定时刻未按 min(填入, 现在) 处理"
+        // 生成计划与这里取 now 之间会差几毫秒；原来要求精确相等，跨毫秒就必挂
+        let expect = want.min(now_ms);
+        assert!(
+            (plan.start_ms - expect).abs() < 2_000,
+            "指定时刻未按 min(填入, 现在) 处理：plan={} expect={expect}",
+            plan.start_ms
         );
         assert_start_not_future(&plan);
     }

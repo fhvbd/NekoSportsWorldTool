@@ -123,8 +123,54 @@ fn build_on_ring(
         f
     };
     let base = dist / dur_f;
+    // ── 全局节奏：热身 → 中段（可能有一次加速）→ 尾段加速或掉速
+    //    之前每公里配速几乎贴着平均值，看起来像匀速机；这里给 20~60 s/km 的快慢差。
+    //   「正分段」（后半程更快）与「掉速」（后半程更慢）各一半概率，
+    //   全程趋势 + 热身 + 中段一次鼓包，叠起来每公里能差 30~50 s。
+    let negative_split = rng.random() < 0.5;
+    let trend_amp = rng.uniform(0.08, 0.13);
+    let warm_frac = rng.uniform(0.06, 0.14);
+    let warm_amp = rng.uniform(0.04, 0.09);
+    let surge_at = rng.uniform(0.35, 0.65);
+    let surge_w = rng.uniform(0.08, 0.16);
+    let surge_amp = rng.uniform(0.04, 0.08);
+    let rhythm = |p: f64| -> f64 {
+        // 全程趋势：正分段越跑越快，否则越跑越慢
+        let trend = if negative_split {
+            1.0 - trend_amp + 2.0 * trend_amp * p
+        } else {
+            1.0 + trend_amp - 2.0 * trend_amp * p
+        };
+        let warm = if p < warm_frac {
+            1.0 - warm_amp * (1.0 - p / warm_frac)
+        } else {
+            1.0
+        };
+        let surge = 1.0 + surge_amp * (-((p - surge_at) / surge_w).powi(2)).exp();
+        warm * trend * surge
+    };
+    // 每公里再叠一点独立起伏（±2~4.5%），避免每公里都贴着平均值
+    let total_km = (dist / 1000.0).max(0.1);
+    let n_km = total_km.ceil() as usize + 1;
+    let km_sigma = rng.uniform(0.02, 0.045);
+    let mut km_off: Vec<f64> = (0..n_km).map(|_| rng.gauss(0.0, km_sigma)).collect();
+    // 重抽几次，保证公里之间至少有 4.5% 的差异（否则整段配速会贴在平均值上）
+    for _ in 0..6 {
+        let hi = km_off.iter().cloned().fold(f64::MIN, f64::max);
+        let lo = km_off.iter().cloned().fold(f64::MAX, f64::min);
+        if hi - lo >= 0.045 {
+            break;
+        }
+        km_off = (0..n_km).map(|_| rng.gauss(0.0, km_sigma)).collect();
+    }
+    let km_mean = km_off.iter().sum::<f64>() / n_km as f64;
+    for v in km_off.iter_mut() {
+        *v -= km_mean;
+    }
+    let mut ou = 0.0f64;          // 随机游走分量（配速不是几个正弦拼出来的）
     let mut w = Vec::with_capacity(n);
     for &tt in &times {
+        let p = (tt / dur_f).clamp(0.0, 1.0);
         let ramp = if tt < 8.0 {
             (0.85 + 0.15 * (tt / 1.0f64.max(8.0f64.min(dur_f / 20.0)))).min(1.0)
         } else {
@@ -135,13 +181,19 @@ fn build_on_ring(
             1.0
         };
         let km_done = (tt / dur_f) * dist / 1000.0;
-        let fatigue = if km_done <= 0.5 { 1.03 } else { (1.03 - 0.06 * (km_done - 0.5)).max(0.80) };
+        let fatigue = if km_done <= 0.5 {
+            1.01
+        } else {
+            (1.01 - 0.05 * (km_done - 0.5)).max(0.90)
+        };
         let wave = (1.0 + 0.010 * (std::f64::consts::TAU * tt / 115.0 + phase_v).sin()
             + 0.035 * (std::f64::consts::TAU * tt / 47.0 + phase_v * 2.3).sin()
             + 0.015 * (std::f64::consts::TAU * tt / 19.0 + phase_v * 3.7).sin())
             * dip_factor(tt);
         let noise = 1.0 + rng.gauss(0.0, 0.008);
-        w.push(base * ramp * fatigue * wave * noise);
+        let ki = ((p * total_km) as usize).min(n_km - 1);
+        ou = 0.93 * ou + rng.gauss(0.0, 0.010);
+        w.push(base * ramp * fatigue * wave * noise * rhythm(p) * (1.0 + km_off[ki] + ou));
     }
     let mut dts: Vec<f64> = (0..n - 1).map(|i| times[i + 1] - times[i]).collect();
     dts.push(1.0f64.max(dur_f - times[n - 1]));
@@ -158,7 +210,9 @@ fn build_on_ring(
             kinds.push((3, 1));
         } else if u < 0.93 {
             kinds.push((0, 1));
-        } else if u < 0.96 {
+        } else if u < 0.995 {
+            // 异常漂移点：原来 3% 且常有 100~300 m 瞬移，App 画线时会断开成虚线；
+            // 降到 0.8% 并把位移限制在十几米内，轨迹保持连续
             kinds.push(rng.weighted(&tl_w));
         } else {
             kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
@@ -226,28 +280,28 @@ fn build_on_ring(
                 if typ == 3 { rng.uniform(1.4, 5.1) } else { rng.uniform(1.4, 2.4) },
                 2,
             );
+            // state=3 是「定位质量差」，占比过高时 App 容易把相邻段画成灰色/断开；
+            // 真人正常跑步大多数点是好定位，这里把 1/2 的比重调高。
             state = if typ == 0 {
-                rng.weighted(&[(1, 145), (2, 45), (3, 164)])
+                rng.weighted(&[(1, 190), (2, 120), (3, 40)])
             } else {
-                rng.weighted(&[(1, 145), (2, 256), (3, 151)])
+                rng.weighted(&[(1, 180), (2, 160), (3, 60)])
             };
         } else {
             match lt {
                 4 => {
                     if rng.random() >= 0.68 {
-                        d_step = if rng.random() < 0.95 { rng.uniform(2.0, 60.0) } else { rng.uniform(60.0, 250.0) };
+                        d_step = rng.uniform(1.0, 8.0);
                     }
                 }
                 1 => {
                     if rng.random() >= 0.83 {
-                        d_step = rng.uniform(0.5, 36.0);
+                        d_step = rng.uniform(0.5, 3.0);
                     }
                 }
-                12 => {
-                    d_step = if rng.random() < 0.9 { rng.uniform(5.0, 80.0) } else { rng.uniform(80.0, 220.0) };
-                }
-                5 => d_step = rng.uniform(5.0, 60.0),
-                _ => d_step = rng.uniform(100.0, 300.0),
+                12 => d_step = rng.uniform(1.0, 6.0),
+                5 => d_step = rng.uniform(1.0, 6.0),
+                _ => d_step = rng.uniform(2.0, 8.0),
             }
             let (bx, by) = pos(s);
             x = bx;
@@ -265,7 +319,8 @@ fn build_on_ring(
                 py = y + jy;
             }
             rad = if lt == 4 {
-                round_to(if rng.random() < 0.75 { rng.uniform(30.0, 100.0) } else { rng.uniform(100.0, 550.0) }, 2)
+                // 半径过大时 App 会把这些点当成无效定位跳过，同样会造成断线
+                round_to(if rng.random() < 0.75 { rng.uniform(6.0, 25.0) } else { rng.uniform(25.0, 60.0) }, 2)
             } else if lt == 1 {
                 round_to(if rng.random() < 0.75 { rng.uniform(1.6, 12.0) } else { rng.uniform(12.0, 95.0) }, 2)
             } else if lt == 12 {

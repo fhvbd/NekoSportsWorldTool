@@ -161,10 +161,99 @@ mod tests {
         assert!(track.totalSteps > 500, "steps={}", track.totalSteps);
     }
 
+    /// 按公里切分：返回每一整公里的配速（秒/公里）。
+    fn km_paces(track: &super::model::Track) -> Vec<f64> {
+        let mut marks: Vec<f64> = Vec::new(); // 每公里累计用时
+        let mut next_km = 1000.0;
+        let (mut last_dis, mut last_time) = (0.0f64, 0.0f64);
+        for p in &track.locations {
+            if p.totalDis > last_dis + 1.0 {
+                while p.totalDis >= next_km && next_km <= track.totalDistance {
+                    let frac = (next_km - last_dis) / (p.totalDis - last_dis);
+                    marks.push(last_time + frac * (p.totalTime as f64 - last_time));
+                    next_km += 1000.0;
+                }
+                last_dis = p.totalDis;
+                last_time = p.totalTime as f64;
+            }
+        }
+        let mut out = Vec::new();
+        let mut prev = 0.0;
+        for m in marks {
+            out.push(m - prev);
+            prev = m;
+        }
+        out
+    }
+
+    /// 每公里配速必须有肉眼可见的快慢差（真人不是匀速机）。
+    #[test]
+    fn test_per_km_pace_varies() {
+        let pts = sample_points();
+        let mut spreads = Vec::new();
+        for seed in 0..10u64 {
+            let track = build(2330.0, 1025, seed, (38.9, 121.54), 1_788_958_186_123, &pts);
+            let paces = km_paces(&track);
+            assert!(paces.len() >= 2, "seed={seed} 没切出公里分段");
+            for p in &paces {
+                assert!((141.0..=600.0).contains(p), "seed={seed} 某公里配速越界 {p:.0}s");
+            }
+            let hi = paces.iter().cloned().fold(f64::MIN, f64::max);
+            let lo = paces.iter().cloned().fold(f64::MAX, f64::min);
+            spreads.push(hi - lo);
+        }
+        let avg = spreads.iter().sum::<f64>() / spreads.len() as f64;
+        // 打印一组样例，方便人工核对
+        let sample = build(2330.0, 1025, 3, (38.9, 121.54), 1_788_958_186_123, &pts);
+        let paces = km_paces(&sample);
+        println!(
+            "每公里配速样例: {}（最大-最小 {:.0}s，10 个种子平均 {:.1}s）",
+            paces
+                .iter()
+                .map(|p| format!("{}:{:02}", (p / 60.0) as i64, (*p as i64) % 60))
+                .collect::<Vec<_>>()
+                .join(" / "),
+            spreads.iter().cloned().fold(0.0, f64::max),
+            avg
+        );
+        for seed in 0..10u64 {
+            let t = build(2330.0, 1025, seed, (38.9, 121.54), 1_788_958_186_123, &pts);
+            let p = km_paces(&t);
+            let spread = p.iter().cloned().fold(f64::MIN, f64::max)
+                - p.iter().cloned().fold(f64::MAX, f64::min);
+            println!(
+                "  seed={seed}: {} [差 {spread:.0}s]",
+                p.iter()
+                    .map(|x| format!("{}:{:02}", (x / 60.0) as i64, (*x as i64) % 60))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            );
+        }
+        assert!(avg > 10.0, "每公里配速平均只差 {avg:.1}s，还是太均匀");
+    }
+
+    /// 相邻轨迹点不能瞬移：超过阈值 App 会判为无效段，画出来就是虚线。
+    #[test]
+    fn test_no_teleporting_points() {
+        let pts = sample_points();
+        let mut worst: f64 = 0.0;
+        for seed in 0..10u64 {
+            let track = build(2330.0, 1025, seed, (38.9, 121.54), 1_788_958_186_123, &pts);
+            let n = track.locations.len();
+            for w in track.locations.windows(2).take(n.saturating_sub(2)) {
+                let d = (((w[1].gLat - w[0].gLat) * MET_PER_DEG_LAT).powi(2)
+                    + ((w[1].gLng - w[0].gLng) * MET_PER_DEG_LNG).powi(2))
+                .sqrt();
+                worst = worst.max(d);
+                assert!(d < 45.0, "seed={seed} 相邻点距离 {d:.0} m，会断线");
+            }
+        }
+        println!("相邻点最大间距 {worst:.1} m");
+    }
+
     /// 打卡点吸附：轨迹必过点位（<40m 落位）。
     #[test]
-    fn test_point_snapping() {
-        let pts = sample_points();
+    fn test_point_snapping() {        let pts = sample_points();
         let track = build(2200.0, 900, 7, (38.9, 121.54), 1_788_958_186_123, &pts);
         for pl in &pts {
             let min_m = track
