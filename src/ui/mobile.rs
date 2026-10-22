@@ -326,10 +326,10 @@ pub fn drag_f64(
     #[cfg(not(target_os = "android"))]
     {
         let _ = id_source;
-        let _ = range;
         ui.add(
             egui::DragValue::new(value)
                 .speed(speed)
+                .range(range)
                 .fixed_decimals(decimals),
         )
     }

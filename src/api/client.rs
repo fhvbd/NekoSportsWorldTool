@@ -174,7 +174,9 @@ pub fn ureq_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, resp) => {
             let body = resp.into_string().unwrap_or_default();
-            format!("HTTP {code}: {}", &body[..body.len().min(300)])
+            // 不能按字节切：中文错误页在 300 字节处常落在字符中间，直接切片会 panic，
+            // 后台线程一挂，busy 标志就永远复位不了（按钮卡在"进行中"）
+            format!("HTTP {code}: {}", crate::textlog::truncate(&body, 300))
         }
         ureq::Error::Transport(t) => format!("网络错误: {t}"),
     }

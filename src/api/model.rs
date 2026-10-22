@@ -190,15 +190,46 @@ fn exe_dir() -> std::path::PathBuf {
 
 fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
     let path = exe_dir().join(name);
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("读取 {name} 失败: {e}");
+            return None;
+        }
+    };
+    match serde_json::from_str(&text) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            // 损坏时先留一份现场：后续保存会用默认值覆盖，原文件就再也找不回来了
+            // （identity.json 里是 device_id，丢了会触发 10121 设备异常）
+            let bak = exe_dir().join(format!("{name}.corrupt"));
+            let _ = std::fs::copy(&path, &bak);
+            eprintln!(
+                "{name} 解析失败（已备份到 {}）: {e}",
+                bak.display()
+            );
+            None
+        }
+    }
 }
 
 fn write_json<T: serde::Serialize>(name: &str, value: &T) -> Result<(), String> {
     let path = exe_dir().join(name);
     let json =
         serde_json::to_string_pretty(value).map_err(|e| format!("序列化 {name} 失败: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("写入 {} 失败: {e}", path.display()))
+    // 原子写：先写同目录临时文件再改名。直接覆盖时若进程被结束/断电，
+    // config.json、identity.json 会留下半截 JSON，读回失败会重新生成 device_id。
+    let tmp = exe_dir().join(format!("{name}.tmp"));
+    std::fs::write(&tmp, json.as_bytes())
+        .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("替换 {} 失败: {e}", path.display()))
+        }
+    }
 }
 
 /// 加载设备身份；device_id / app_install_time 缺失时生成一次并立即落盘，

@@ -161,6 +161,15 @@ fn decode_file(path: &std::path::Path) -> Result<ColorImage, String> {
         return Err(format!("GdipBitmapLockBits 失败（status={status}）"));
     }
 
+    // GDI+ 正常返回正向 stride；万一拿到负值（自底向上位图），
+    // `as usize` 会回绕成巨大偏移，后面的指针运算就越界了
+    if data.stride <= 0 || (data.stride as usize) < width as usize * 4 {
+        unsafe {
+            GdipBitmapUnlockBits(bitmap, &mut data);
+            GdipDisposeImage(bitmap);
+        }
+        return Err(format!("位图 stride 异常：{}", data.stride));
+    }
     let (w, h, stride) = (width as usize, height as usize, data.stride as usize);
     let mut pixels = Vec::with_capacity(w * h * 4);
     unsafe {

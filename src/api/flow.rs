@@ -195,6 +195,17 @@ pub fn run_full_flow(
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
     // 手绘路线优先：用户画的折线直接当路径，不再走打卡点环/道路路由
     let drawn = params.drawn.clone().filter(|d| d.is_usable());
+    if params.drawn.is_some() && drawn.is_none() {
+        log(&format!(
+            "⚠ [track] 手绘路线只有 {}，太短（至少要 {:.0} m），本次改用打卡点环",
+            params
+                .drawn
+                .as_ref()
+                .map(|d| d.summary())
+                .unwrap_or_default(),
+            crate::track::drawn::MIN_USABLE_M,
+        ));
+    }
     let mut track = if let Some(drawn) = drawn.as_ref() {
         drawn.validate()?;
         let gaps = drawn.checkpoint_gaps(&pts_bd);
@@ -209,11 +220,6 @@ pub fn run_full_flow(
                 "⚠ [track] 有 {missed} 个打卡点离手绘路线超过 40 m，可能被判「未经过」——建议在「模拟位置」页点「串上打卡点」"
             ));
         }
-        let center = pts_bd
-            .first()
-            .copied()
-            .unwrap_or((anchor.latitude, anchor.longitude));
-        let _ = center;
         crate::track::generator::build_on_path(
             &drawn.points,
             drawn.closed,
@@ -346,7 +352,6 @@ pub fn run_full_flow(
 
     // ④ 五点 wrapper（跑完态）
     let five = five_point_wrapper(&pts, track.startTime);
-    let _ = &five;
 
     // ⑤ 提交（sportType=1）
     log("[record] 提交跑步记录（sportType=1）…");

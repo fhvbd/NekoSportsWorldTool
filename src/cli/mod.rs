@@ -57,10 +57,16 @@ pub(crate) fn parse_flags(rest: &[&str]) -> Vec<(String, String)> {
     let mut i = 0;
     while i < rest.len() {
         let k = rest[i].trim_start_matches('-').to_string();
-        let v = rest
-            .get(i + 1)
-            .filter(|n| !n.starts_with('-') && *n != &"")
-            .map(|s| s.to_string());
+        // 下一个 token 只有在「看起来像开关」时才不作为值：
+        // `--lat -12.3` / `--lon -73.9` 这种负数必须当成值，否则经纬度会静默退回默认值
+        let v = rest.get(i + 1).copied().filter(|n| !n.is_empty()).and_then(|n| {
+            let looks_like_flag = n.starts_with("--") || (n.starts_with('-') && n.parse::<f64>().is_err());
+            if looks_like_flag {
+                None
+            } else {
+                Some(n.to_string())
+            }
+        });
         match v {
             Some(v) => {
                 out.push((k, v));
@@ -179,5 +185,30 @@ pub(crate) fn parse_pace(v: &str) -> f32 {
         m.parse::<f32>().unwrap_or(0.0) * 60.0 + s.parse::<f32>().unwrap_or(0.0)
     } else {
         v.parse().unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_flags;
+
+    fn get<'a>(f: &'a [(String, String)], k: &str) -> Option<&'a str> {
+        f.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+    }
+
+    /// 负经纬度必须当成值：`--lat -12.3` 不能被解析成开关 `lat=1`。
+    #[test]
+    fn negative_numbers_are_values() {
+        let f = parse_flags(&["--lat", "-12.3", "--lon", "-73.9"]);
+        assert_eq!(get(&f, "lat"), Some("-12.3"));
+        assert_eq!(get(&f, "lon"), Some("-73.9"));
+    }
+
+    /// 真正的开关仍按「无值」处理，不会把后面的 flag 名当成值吃掉。
+    #[test]
+    fn long_flags_stay_flags() {
+        let f = parse_flags(&["--enable", "--dist", "2.5"]);
+        assert_eq!(get(&f, "enable"), Some("1"));
+        assert_eq!(get(&f, "dist"), Some("2.5"));
     }
 }

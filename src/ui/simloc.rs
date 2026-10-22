@@ -416,6 +416,22 @@ impl App {
             if let Some(note) = page.tiles.note.clone() {
                 ui.colored_label(theme::warn(), format!("底图异常：{note}"));
             }
+        if changed {
+            if let Some(i) = chosen {
+                    let (_, url, datum) = crate::ui::tiles::PRESETS[i];
+                    page.tiles.url_template = url.to_string();
+                    page.tiles.datum = datum;
+                    page.tiles.reset();
+                    self.config.tile_url = url.to_string();
+                    self.config.tile_datum = datum.code().to_string();
+                    let _ = crate::api::model::save_config(&self.config);
+                    page.flash(
+                        format!("底图已切换为「{}」", crate::ui::tiles::PRESETS[i].0),
+                        false,
+                    );
+                }
+            }
+        }
         // ── 校园范围（只显示学校这一块）──────────────────────────
         if page.campus.is_none() && !page.points.is_empty() {
             if page.recompute_campus(CAMPUS_MARGIN_M) {
@@ -509,22 +525,6 @@ impl App {
                 page.flash("没有打卡点缓存，先点「重新读取点位」", true);
             }
         }
-        if changed {
-            if let Some(i) = chosen {
-                    let (_, url, datum) = crate::ui::tiles::PRESETS[i];
-                    page.tiles.url_template = url.to_string();
-                    page.tiles.datum = datum;
-                    page.tiles.reset();
-                    self.config.tile_url = url.to_string();
-                    self.config.tile_datum = datum.code().to_string();
-                    let _ = crate::api::model::save_config(&self.config);
-                    page.flash(
-                        format!("底图已切换为「{}」", crate::ui::tiles::PRESETS[i].0),
-                        false,
-                    );
-                }
-            }
-        }
         if reload_points {
             page.points_loaded = false;
             page.points = crate::api::model::load_points_cache_any()
@@ -583,7 +583,14 @@ impl App {
                                 self.status = "√ 模拟位置已保存".into();
                                 self.log.push("√  模拟位置已保存到 config.json");
                                 self.invalidate_run_preview();
-                                self.refresh_points(false);
+                                // 锚点变了，旧点位属于旧位置：清空并强制重拉，
+                                // 否则「按打卡点重算」会拿旧学校的点位算出旧 bbox 写进配置
+                                page.points.clear();
+                                page.points_loaded = false;
+                                page.campus = None;
+                                self.config.campus_bbox = None;
+                                let _ = crate::api::model::save_config(&self.config);
+                                self.refresh_points(true);
                             }
                             Err(e) => page.flash(format!("保存失败：{e}"), true),
                         }
@@ -1369,15 +1376,31 @@ fn nearest_vertex(
 
 /// 左下角比例尺（自动挑 1/2/5 × 10^n 米）。
 fn draw_scale_bar(painter: &egui::Painter, canvas: egui::Rect, map: &MapState) {
-    let target_m = 100.0_f64;
-    let px = (target_m * map.scale as f64) as f32;
-    let (label, width) = if px > 260.0 {
-        ("500 m", 500.0 * map.scale)
-    } else if px < 40.0 {
-        ("20 m", 20.0 * map.scale)
+    // 目标 90 px 左右，按 1/2/5×10^n 取一个"整"的米数，再把长度夹在 [40, 260] px，
+    // 避免缩放到极端时比例尺画成一条看不见的线或直接捅出画布
+    let scale = map.scale.max(1e-6) as f64;
+    let rough = 90.0 / scale;
+    let mag = 10f64.powf(rough.log10().floor());
+    let mut nice = mag;
+    for k in [1.0, 2.0, 5.0, 10.0] {
+        if mag * k >= rough {
+            nice = mag * k;
+            break;
+        }
+    }
+    let mut width = (nice * scale) as f32;
+    if width < 40.0 {
+        width = 40.0;
+    }
+    if width > 260.0 {
+        width = 260.0;
+    }
+    let label = if nice >= 1000.0 {
+        format!("{:.1} km", nice / 1000.0)
     } else {
-        ("100 m", px)
+        format!("{nice:.0} m")
     };
+    let label: &str = &label;
     let y = canvas.bottom() - 12.0;
     let x0 = canvas.left() + 10.0;
     let stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(70, 84, 80));

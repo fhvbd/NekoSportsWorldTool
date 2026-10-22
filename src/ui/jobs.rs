@@ -406,7 +406,9 @@ impl App {
             log(&format!("√ [ai] {} 个项目共 {} 条记录", list.len(), count));
             let payload = serde_json::json!({ "groups": all_groups, "total": total });
             tx.send(format!("{AI_RECORDS}{payload}")).ok();
-            tx.send("__AI_RECORDS_DONE__".to_string()).ok();
+            // 收尾标记多余：records_busy 已由 AI_RECORDS 分支复位，
+            // 多余的 "__AI_RECORDS_DONE__" 没有分发规则，会原样打进运行日志
+
         });
     }
 

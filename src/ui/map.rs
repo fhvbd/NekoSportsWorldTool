@@ -149,7 +149,8 @@ impl MapState {
                 .map(|p| rect.contains(p))
                 .unwrap_or(false);
             let dragging = hover && i.pointer.primary_down() && i.pointer.is_decidedly_dragging();
-            (dragging, i.raw_scroll_delta.y)
+            // 指针不在画布上时不要把页面滚动当成缩放
+            (dragging, if hover { i.raw_scroll_delta.y } else { 0.0 })
         });
         if drag {
             let d = ui.input(|i| i.pointer.delta());

@@ -37,7 +37,13 @@ impl Rng {
         rand::Rng::gen_range(&mut self.inner, a..=b)
     }
     pub fn gauss(&mut self, mu: f64, sigma: f64) -> f64 {
-        Normal::new(mu, sigma).unwrap().sample(&mut self.inner)
+        // sigma<=0 / NaN 时 Normal::new 会返回 Err，这里退化成常数，绝不 panic
+        if !(sigma > 0.0) || !sigma.is_finite() {
+            return if mu.is_finite() { mu } else { 0.0 };
+        }
+        Normal::new(mu, sigma)
+            .map(|d| d.sample(&mut self.inner))
+            .unwrap_or(mu)
     }
     pub fn choice<T>(&mut self, items: &[T]) -> T
     where
@@ -212,7 +218,7 @@ pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
     ordered.sort_by(|a, b| {
         let ka = (a.0 - cx).atan2(a.1 - cy);
         let kb = (b.0 - cx).atan2(b.1 - cy);
-        ka.partial_cmp(&kb).unwrap()
+        ka.total_cmp(&kb)
     });
     let plane: Vec<(f64, f64)> = ordered
         .iter()
@@ -235,7 +241,30 @@ pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
         let b = dense[i % dense.len()];
         arcs.push(arcs[i - 1] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt());
     }
+    // 只有 1~2 个点、或点位几乎重合时，环长度≈0：整条轨迹会塌成一个点，
+    // 这里退化成绕中心的小圆，保证还能生成一条闭合路线
+    let total = *arcs.last().unwrap_or(&0.0);
+    if n < 3 || !total.is_finite() || total < 40.0 {
+        return circle_ring((cx, cy), 45.0);
+    }
     (dense, arcs, (cx, cy))
+}
+
+/// 以 `center_bd` 为圆心、`radius_m` 为半径生成闭合圆环（米制平面，供退化场景兜底）。
+pub fn circle_ring(center_bd: (f64, f64), radius_m: f64) -> PointRing {
+    let n = 48usize;
+    let mut dense = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let a = std::f64::consts::TAU * i as f64 / n as f64;
+        dense.push((radius_m * a.cos(), radius_m * a.sin()));
+    }
+    let mut arcs = vec![0.0f64];
+    for i in 1..dense.len() {
+        let a = dense[i - 1];
+        let b = dense[i];
+        arcs.push(arcs[i - 1] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt());
+    }
+    (dense, arcs, center_bd)
 }
 
 /// 环线弧长 → 坐标（线性插值）。

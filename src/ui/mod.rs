@@ -49,6 +49,8 @@ pub const UPDATE_PROG: &str = "__UPDATE_PROG__";
 pub const UPDATE_DONE: &str = "__UPDATE_DONE__";
 pub const FENCE_DONE: &str = "__FENCE_DONE__";
 pub const POINTS_DONE: &str = "__POINTS_DONE__";
+/// 后台线程 panic 的兜底消息（见 [`App::spawn_job`]）。
+pub const JOB_PANIC: &str = "__JOB_PANIC__";
 
 /// 标签页下标（与 `mobile::tab_bar` 的 TABS 顺序一致）。
 pub const TAB_RUN: usize = 0;
@@ -383,6 +385,8 @@ impl App {
                 preview: None,
                 preview_stale: true,
                 map_fitted: false,
+                cps: Vec::new(),
+                cps_loaded: false,
             },
             ai_page: ai::AiPage {
                 days: 1,
@@ -449,7 +453,15 @@ impl App {
         F: FnOnce(Sender<String>) + Send + 'static,
     {
         let tx = self.tx.clone();
-        std::thread::spawn(move || f(tx));
+        let tx_panic = tx.clone();
+        std::thread::spawn(move || {
+            // 后台任务里任何 panic 都会让"进行中"标志永远复位不了（按钮卡死、提示不出）。
+            // 这里兜住：panic 后补发一条 JOB_PANIC，由消息分发统一复位。
+            let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(tx)));
+            if done.is_err() {
+                let _ = tx_panic.send(format!("{JOB_PANIC}后台任务异常退出"));
+            }
+        });
     }
 
     pub fn logger(tx: Sender<String>) -> impl FnMut(&str) {

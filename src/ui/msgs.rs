@@ -2,9 +2,9 @@
 
 use super::about::FinishAction;
 use super::{
-    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE,
-    POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE,
-    UPDATE_PROG, USER,
+    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, JOB_PANIC,
+    LOGIN_DONE, POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK,
+    UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
 use chrono::TimeZone;
@@ -12,6 +12,7 @@ use chrono::TimeZone;
 impl App {
     pub(crate) fn poll_messages(&mut self) {
         let mut done_ip = None;
+        let mut job_panic: Option<String> = None;
         let mut done_login = None;
         let mut done_run = None;
         let mut done_ai = None;
@@ -74,10 +75,28 @@ impl App {
                 update_prog = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(UPDATE_DONE) {
                 update_done = Some(v.to_string());
+            } else if let Some(v) = msg.strip_prefix(JOB_PANIC) {
+                job_panic = Some(v.to_string());
             } else {
                 self.log.push(&msg);
             }
         }
+        if let Some(v) = job_panic {
+            // 线程已经没了，把所有"进行中"复位，避免界面永久卡住
+            self.login_busy = false;
+            self.run_busy = false;
+            self.ai_busy = false;
+            self.records_busy = false;
+            self.data_busy = false;
+            self.user_busy = false;
+            self.osm_page.busy = false;
+            self.update.checking = false;
+            self.update.downloading = false;
+            self.status = "后台任务异常退出，已复位（详见运行日志）".into();
+            self.log
+                .push(&format!("× 后台任务异常退出：{v}（已复位所有进行中状态）"));
+        }
+
         let got_semester = semester_json.is_some();
         let got_cheat = cheat_json.is_some();
         let got_rank = rank_json.is_some();
@@ -109,6 +128,9 @@ impl App {
         }
         if done_points {
             self.run_page.preview_stale = true;
+            self.run_page.cps_loaded = false;
+            // 新点位已落盘：让「模拟位置」页下一帧重新读盘，否则地图一直显示旧点位
+            self.sim_loc_page.points_loaded = false;
         }
         if let Some(v) = done_login {
             self.login_busy = false;

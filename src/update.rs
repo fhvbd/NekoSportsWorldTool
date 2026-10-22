@@ -184,6 +184,9 @@ fn split_rev(v: &str) -> (Vec<u64>, Option<u64>) {
 }
 
 /// 流式下载（默认 agent 30s 总超时不够下几 MB 的包，专用长超时）。
+/// 发布包大小上限（防异常大文件把内存吃满）。
+const MAX_DOWNLOAD_BYTES: usize = 512 * 1024 * 1024;
+
 pub fn download(url: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<Vec<u8>, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(300))
@@ -200,6 +203,13 @@ pub fn download(url: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
+        // 上限保护：发布包正常只有几十 MB，异常大就中止，避免把内存吃满
+        if buf.len() > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "发布包超过 {} MB，已中止下载",
+                MAX_DOWNLOAD_BYTES / 1024 / 1024
+            ));
+        }
         progress(buf.len() as u64, total);
     }
     Ok(buf)
@@ -302,6 +312,12 @@ pub fn apply(binary: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("设置执行权限失败: {e}"))?;
+    }
+    // 换掉自己之前先确认拿到的是可执行文件，避免把程序换成一堆垃圾后打不开
+    #[cfg(windows)]
+    if binary.len() < 2 || &binary[..2] != b"MZ" {
+        let _ = std::fs::remove_file(&new);
+        return Err("下载内容不是有效的 Windows 程序（缺少 MZ 头），已取消替换".into());
     }
     let _ = std::fs::remove_file(&old);
     std::fs::rename(&exe, &old).map_err(|e| {

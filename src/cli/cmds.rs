@@ -607,19 +607,13 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
                     .ok();
                 println!("已保存 {out}");
             } else if n > 0 {
-                println!(
-                    "首条: {}",
-                    &arr[0].to_string()[..arr[0].to_string().len().min(300)]
-                );
+                println!("首条: {}", crate::textlog::truncate(&arr[0].to_string(), 300));
                 println!(
                     "末条: {}",
-                    &arr[n - 1].to_string()[..arr[n - 1].to_string().len().min(300)]
+                    crate::textlog::truncate(&arr[n - 1].to_string(), 300)
                 );
             } else {
-                println!(
-                    "data: {}",
-                    data.to_string()[..data.to_string().len().min(500)].to_string()
-                );
+                println!("data: {}", crate::textlog::truncate(&data.to_string(), 500));
             }
             0
         }

@@ -87,6 +87,9 @@ pub struct RunPage {
     pub preview_stale: bool,
     /// 地图视野是否已适配
     pub map_fitted: bool,
+    /// 点位缓存（BD-09），避免预览每帧读盘
+    pub cps: Vec<(f64, f64)>,
+    pub cps_loaded: bool,
 }
 
 /// 一次提交的确定方案（进入页面/参数变更时抽样生成）。
@@ -522,9 +525,15 @@ impl App {
         ui: &mut egui::Ui,
         route: &crate::track::drawn::DrawnRoute,
     ) {
-        let cps = crate::api::model::load_points_cache_any()
-            .map(|p| crate::api::points::points_bd(&p))
-            .unwrap_or_default();
+        // 每帧都 read_to_string + 解析 points_cache.json 太浪费：缓存住，
+        // 只在首次绘制或预览过期（点位刷新/锚点变化）时重读
+        if !self.run_page.cps_loaded {
+            self.run_page.cps = crate::api::model::load_points_cache_any()
+                .map(|p| crate::api::points::points_bd(&p))
+                .unwrap_or_default();
+            self.run_page.cps_loaded = true;
+        }
+        let cps = self.run_page.cps.clone();
         let (response, painter) = ui.allocate_painter(
             egui::Vec2::new(ui.available_width().max(200.0), 260.0),
             egui::Sense::drag(),
