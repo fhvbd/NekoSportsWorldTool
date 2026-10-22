@@ -310,7 +310,7 @@ pub fn bbox_from_points(points: &[(f64, f64)], margin_m: f64) -> Option<[f64; 4]
         return None;
     }
     let d_lat = margin_m / crate::track::geom::MET_PER_DEG_LAT;
-    let d_lon = margin_m / crate::track::geom::MET_PER_DEG_LNG;
+    let d_lon = margin_m / crate::track::geom::met_per_deg_lng((min_lat + max_lat) / 2.0);
     Some([
         min_lat - d_lat,
         min_lon - d_lon,
@@ -330,7 +330,8 @@ pub fn bbox_center(bbox: [f64; 4]) -> (f64, f64) {
 /// 矩形的边长（米，东西 × 南北）。
 pub fn bbox_size_m(bbox: [f64; 4]) -> (f64, f64) {
     (
-        (bbox[3] - bbox[1]) * crate::track::geom::MET_PER_DEG_LNG,
+        (bbox[3] - bbox[1])
+            * crate::track::geom::met_per_deg_lng((bbox[0] + bbox[2]) / 2.0),
         (bbox[2] - bbox[0]) * crate::track::geom::MET_PER_DEG_LAT,
     )
 }
@@ -487,7 +488,8 @@ mod tests {
         // 外扩 150 m 后高度约 73 m + 300 m，宽度约 145 m + 300 m
         let (w, h) = bbox_size_m(bbox);
         assert!((h - 373.0).abs() < 5.0, "h={h}");
-        assert!((w - 445.0).abs() < 5.0, "w={w}");
+        // 长沙纬度下经度 1° ≈ 98 km：点位跨度 0.00168° ≈ 165 m，加 300 m 余量 ≈ 465 m
+        assert!((w - 465.0).abs() < 6.0, "w={w}");
         // 中心在两点之间
         let (lat, lon) = bbox_center(bbox);
         assert!(lat > 28.2673 && lat < 28.2680, "lat={lat}");

@@ -114,7 +114,12 @@ mod tests {
             "dist={}",
             track.totalDistance
         );
-        assert_eq!(track.totalTime, 1220);
+        // 结尾断崖会给最后一段追加 6~14s，总时长等于「目标时长 + 追加秒数」
+        assert!(
+            (1220..=1234).contains(&track.totalTime),
+            "totalTime={}",
+            track.totalTime
+        );
         // 点数合理（主 5s 采样）
         let n = track.locations.len();
         assert!((200..320).contains(&n), "n={n}");
@@ -329,7 +334,11 @@ mod tests {
             &square,
         );
         assert!((track.totalDistance - 1960.0).abs() < 1.0, "{}", track.totalDistance);
-        assert_eq!(track.totalTime, 720);
+        assert!(
+            (720..=734).contains(&track.totalTime),
+            "totalTime={}",
+            track.totalTime
+        );
         // 除收尾断崖点外，轨迹都该落在画的方形附近（含抖动 < 20 m）
         let n = track.locations.len();
         for p in track.locations.iter().take(n - 1) {

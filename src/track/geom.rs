@@ -8,7 +8,18 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 
 pub const MET_PER_DEG_LAT: f64 = 111_132.0;
+/// 赤道处经度 1° 的米数。
+pub const MET_PER_DEG_LNG_EQ: f64 = 111_320.0;
+/// 旧常量：纬度 38.9°（默认城市大连）处的经度米数，仅留给拿不到纬度的调用点。
 pub const MET_PER_DEG_LNG: f64 = 86_600.0;
+
+/// 指定纬度处经度 1° 的米数。
+///
+/// 经度方向随纬度收缩：长沙（28.3°）约 98.0 km/°，大连（38.9°）约 86.6 km/°。
+/// 用错纬度会让东西向距离差 10% 以上，地图矢量层会和卫星瓦片错位。
+pub fn met_per_deg_lng(lat: f64) -> f64 {
+    MET_PER_DEG_LNG_EQ * lat.to_radians().cos().abs().max(0.08)
+}
 
 /// round(x, n)：按精确二进制值四舍五入。
 pub fn round_to(x: f64, n: usize) -> f64 {
@@ -105,9 +116,10 @@ pub fn make_path_ring(path_bd: &[(f64, f64)], closed: bool) -> PointRing {
     let n = path_bd.len();
     let cx = path_bd.iter().map(|q| q.0).sum::<f64>() / n as f64;
     let cy = path_bd.iter().map(|q| q.1).sum::<f64>() / n as f64;
+    let kx = met_per_deg_lng(cx);
     let plane: Vec<(f64, f64)> = path_bd
         .iter()
-        .map(|q| ((q.1 - cy) * MET_PER_DEG_LNG, (q.0 - cx) * MET_PER_DEG_LAT))
+        .map(|q| ((q.1 - cy) * kx, (q.0 - cx) * MET_PER_DEG_LAT))
         .collect();
 
     // ① 折返：把回程点接在末尾（去掉重复的终点）
@@ -172,9 +184,10 @@ pub fn distance_to_polyline(
     for i in 0..segs {
         let a = path[i];
         let b = path[(i + 1) % path.len()];
-        let (ax, ay) = ((a.1) * MET_PER_DEG_LNG, (a.0) * MET_PER_DEG_LAT);
-        let (bx, by) = ((b.1) * MET_PER_DEG_LNG, (b.0) * MET_PER_DEG_LAT);
-        let (px, py) = ((pt.1) * MET_PER_DEG_LNG, (pt.0) * MET_PER_DEG_LAT);
+        let kx = met_per_deg_lng(pt.0);
+        let (ax, ay) = ((a.1) * kx, (a.0) * MET_PER_DEG_LAT);
+        let (bx, by) = ((b.1) * kx, (b.0) * MET_PER_DEG_LAT);
+        let (px, py) = ((pt.1) * kx, (pt.0) * MET_PER_DEG_LAT);
         let (dx, dy) = (bx - ax, by - ay);
         let len2 = dx * dx + dy * dy;
         let t = if len2 <= 1e-9 {
@@ -197,11 +210,13 @@ pub fn polyline_len_m(path: &[(f64, f64)], closed: bool) -> f64 {
         return 0.0;
     }
     let mut total = 0.0;
+    let mean_lat = path.iter().map(|q| q.0).sum::<f64>() / path.len() as f64;
+    let kx = met_per_deg_lng(mean_lat);
     let segs = if closed { path.len() } else { path.len() - 1 };
     for i in 0..segs {
         let a = path[i];
         let b = path[(i + 1) % path.len()];
-        let dx = (b.1 - a.1) * MET_PER_DEG_LNG;
+        let dx = (b.1 - a.1) * kx;
         let dy = (b.0 - a.0) * MET_PER_DEG_LAT;
         total += (dx * dx + dy * dy).sqrt();
     }
@@ -220,9 +235,11 @@ pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
         let kb = (b.0 - cx).atan2(b.1 - cy);
         ka.total_cmp(&kb)
     });
+    // 注意：cx 是纬度质心、cy 是经度质心 —— 经度米数要按**纬度**取
+    let kx = met_per_deg_lng(cx);
     let plane: Vec<(f64, f64)> = ordered
         .iter()
-        .map(|q| ((q.1 - cy) * MET_PER_DEG_LNG, (q.0 - cx) * MET_PER_DEG_LAT))
+        .map(|q| ((q.1 - cy) * kx, (q.0 - cx) * MET_PER_DEG_LAT))
         .collect();
     let samples = 18usize;
     let mut dense = Vec::with_capacity(n * samples);
@@ -294,7 +311,7 @@ pub fn ring_point_at(dense: &[(f64, f64)], arcs: &[f64], s: f64) -> (f64, f64) {
 }
 
 pub fn to_bd(x: f64, y: f64, c_lat: f64, c_lng: f64) -> (f64, f64) {
-    (c_lat + y / MET_PER_DEG_LAT, c_lng + x / MET_PER_DEG_LNG)
+    (c_lat + y / MET_PER_DEG_LAT, c_lng + x / met_per_deg_lng(c_lat))
 }
 
 // ── 坐标基准转换：WGS84 ↔ GCJ-02 ↔ BD-09 ─────────────────────────

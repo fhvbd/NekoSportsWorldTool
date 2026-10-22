@@ -121,7 +121,17 @@ fn encrypt_data(pub_key: &rsa::RsaPublicKey, plaintext: &str) -> String {
 fn get_w(set_left: usize, lot_number: &str, pow_msg: &str, pow_sign: &str, str16: &str) -> String {
     let pk = gee_rsa_public_key();
     let userresponse = set_left as f64 / 1.005_946_666_666_666_5 + 2.0;
-    let lf = |a: usize, b: usize| lot_number[a..b].to_string();
+    // 按字符切片：服务端字段长度/编码一变，按字节切就会 panic 或切碎中文
+    let chars: Vec<char> = lot_number.chars().collect();
+    let lf = |a: usize, b: usize| -> String {
+        let a = a.min(chars.len());
+        let b = b.min(chars.len());
+        if a >= b {
+            String::new()
+        } else {
+            chars[a..b].iter().collect()
+        }
+    };
     let plaintext = format!(
         "{{\"setLeft\":{},\"passtime\":1887,\"userresponse\":{},\"device_id\":\"\",\"lot_number\":\"{}\",\"pow_msg\":\"{}\",\"pow_sign\":\"{}\",\"geetest\":\"captcha\",\"lang\":\"zh\",\"ep\":\"123\",\"biht\":\"1426265548\",\"gee_guard\":{{\"roe\":{{\"aup\":\"3\",\"sep\":\"3\",\"egp\":\"3\",\"auh\":\"3\",\"rew\":\"3\",\"snh\":\"3\",\"res\":\"3\",\"cdc\":\"3\"}}}},\"YciC\":\"P3Vn\",\"{}\":\"{}\",\"em\":{{\"ph\":0,\"cp\":0,\"ek\":\"11\",\"wd\":1,\"nt\":0,\"si\":0,\"sc\":0}}}}",
         set_left,

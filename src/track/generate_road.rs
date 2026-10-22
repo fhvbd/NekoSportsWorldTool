@@ -206,6 +206,12 @@ pub fn build_road(
     must_bd: &[(f64, f64)],
     net: &RoadGraph,
 ) -> Result<Track, String> {
+    if dur <= 0 || !dist.is_finite() || dist <= 0.0 {
+        return Err(format!("路线参数非法（dist={dist}, dur={dur}）"));
+    }
+    if route_bd.is_empty() {
+        return Err("没有可用的路线点位".into());
+    }
     let mut rng = Rng::new(seed);
     let dur_f = dur as f64;
     let avg_v = dist / dur_f;
@@ -277,7 +283,9 @@ pub fn build_road(
             kinds.push((3, 1));
         } else if u < 0.93 {
             kinds.push((0, 1));
-        } else if u < 0.96 {
+        } else if u < 0.995 {
+            // 与经典模式一致：异常点 0.5%，且位移限制在十几米内，
+            // 否则相邻点瞬移上百米，App 会把这些段画成虚线/判为无效
             kinds.push(rng.weighted(&tl_w));
         } else {
             kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
@@ -397,18 +405,12 @@ pub fn build_road(
                 }
                 1 => {
                     if rng.random() >= 0.83 {
-                        d_step = rng.uniform(0.5, 36.0);
+                        d_step = rng.uniform(0.5, 3.0);
                     }
                 }
-                12 => {
-                    d_step = if rng.random() < 0.9 {
-                        rng.uniform(5.0, 80.0)
-                    } else {
-                        rng.uniform(80.0, 220.0)
-                    };
-                }
-                5 => d_step = rng.uniform(5.0, 60.0),
-                _ => d_step = rng.uniform(100.0, 300.0),
+                12 => d_step = rng.uniform(1.0, 6.0),
+                5 => d_step = rng.uniform(1.0, 6.0),
+                _ => d_step = rng.uniform(2.0, 8.0),
             }
             let (bx, by) = pos(s);
             x = bx;

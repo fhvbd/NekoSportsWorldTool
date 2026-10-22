@@ -5,7 +5,7 @@
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
-use crate::track::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
+use crate::track::geom::{met_per_deg_lng, MET_PER_DEG_LAT};
 
 /// 地图视图状态（世界坐标为度）。
 pub struct MapState {
@@ -50,7 +50,7 @@ impl MapState {
             f64::NEG_INFINITY,
         );
         for (la, lo) in pts {
-            let x = (lo - self.center.1) * MET_PER_DEG_LNG;
+            let x = (lo - self.center.1) * met_per_deg_lng(self.center.0);
             let y = (la - self.center.0) * MET_PER_DEG_LAT;
             minx = minx.min(x);
             maxx = maxx.max(x);
@@ -67,7 +67,7 @@ impl MapState {
 
     /// 度坐标 → 屏幕坐标。
     pub fn to_screen(&self, rect: Rect, lat: f64, lon: f64) -> Pos2 {
-        let x = (lon - self.center.1) * MET_PER_DEG_LNG * self.scale as f64;
+        let x = (lon - self.center.1) * met_per_deg_lng(self.center.0) * self.scale as f64;
         let y = -(lat - self.center.0) * MET_PER_DEG_LAT * self.scale as f64;
         let c = rect.center();
         Pos2::new(
@@ -83,7 +83,7 @@ impl MapState {
         let y = -(pos.y as f64 - c.y as f64 - self.offset.y as f64) / self.scale.max(1e-6) as f64;
         (
             self.center.0 + y / MET_PER_DEG_LAT,
-            self.center.1 + x / MET_PER_DEG_LNG,
+            self.center.1 + x / met_per_deg_lng(self.center.0),
         )
     }
 
@@ -92,7 +92,7 @@ impl MapState {
         let [min_lat, min_lon, max_lat, max_lon] = bbox;
         let span_lat = (max_lat - min_lat).max(1e-6);
         let span_lon = (max_lon - min_lon).max(1e-6);
-        let scale_x = rect.width() as f64 / (span_lon * MET_PER_DEG_LNG);
+        let scale_x = rect.width() as f64 / (span_lon * met_per_deg_lng((min_lat + max_lat) / 2.0));
         let scale_y = rect.height() as f64 / (span_lat * MET_PER_DEG_LAT);
         let scale = scale_x.min(scale_y) * 0.94;
         if !scale.is_finite() || scale <= 0.0 {
@@ -112,7 +112,8 @@ impl MapState {
         let [min_lat, min_lon, max_lat, max_lon] = bbox;
         let span_lat = (max_lat - min_lat).max(1e-7);
         let span_lon = (max_lon - min_lon).max(1e-7);
-        let fit_x = rect.width() as f64 / (span_lon * MET_PER_DEG_LNG);
+        let fit_x =
+            rect.width() as f64 / (span_lon * met_per_deg_lng((min_lat + max_lat) / 2.0));
         let fit_y = rect.height() as f64 / (span_lat * MET_PER_DEG_LAT);
         // 再缩就会看到 bbox 之外
         let min_scale = (fit_x.min(fit_y) as f32).max(1e-4);
@@ -122,8 +123,9 @@ impl MapState {
         let scale = self.scale.max(1e-4) as f64;
         // 视口中心当前对应的世界坐标
         let lat = self.center.0 + self.offset.y as f64 / (MET_PER_DEG_LAT * scale);
-        let lon = self.center.1 - self.offset.x as f64 / (MET_PER_DEG_LNG * scale);
-        let half_w = (rect.width() as f64 / 2.0) / (MET_PER_DEG_LNG * scale);
+        let kx = met_per_deg_lng((min_lat + max_lat) / 2.0);
+        let lon = self.center.1 - self.offset.x as f64 / (kx * scale);
+        let half_w = (rect.width() as f64 / 2.0) / (kx * scale);
         let half_h = (rect.height() as f64 / 2.0) / (MET_PER_DEG_LAT * scale);
         let lat = if half_h >= span_lat / 2.0 {
             (min_lat + max_lat) / 2.0

@@ -54,11 +54,11 @@ pub fn upload_both_keys(
     ok
 }
 
-fn shorten(url: &str) -> &str {
+fn shorten(url: &str) -> String {
     // 只显示 objectKey 部分，避免日志过长
     let start = url.find("run_data").unwrap_or(0);
-    let end = (start + 60).min(url.len());
-    &url[start..end]
+    // 按字符截断：URL 里可能有中文 objectKey，按字节切会 panic
+    crate::textlog::truncate(&url[start..], 60)
 }
 
 /// 回读验证（GET 签名）。

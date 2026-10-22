@@ -121,7 +121,7 @@ impl DrawnRoute {
             .iter()
             .map(|p| {
                 let dy = (p.0 - lat) * super::geom::MET_PER_DEG_LAT;
-                let dx = (p.1 - lon) * super::geom::MET_PER_DEG_LNG;
+                let dx = (p.1 - lon) * super::geom::met_per_deg_lng(lat);
                 (dx * dx + dy * dy).sqrt()
             })
             .fold(0.0f64, f64::max)

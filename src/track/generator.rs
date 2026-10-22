@@ -43,12 +43,22 @@ pub fn build(
     dist: f64,
     dur: i64,
     seed: u64,
-    _center: (f64, f64),
+    center: (f64, f64),
     start_ms: i64,
     points_bd: &[(f64, f64)],
 ) -> Track {
-    let (dense, arcs, center) = make_point_ring(points_bd);
-    build_on_ring(&dense, &arcs, center, dist, dur, seed, start_ms, points_bd)
+    // 参数兜底：dur<=0 会让采样点数变 0，`(0..n-1)` 下溢 → capacity overflow 直接崩；
+    // dist 非有限会把速度算成 NaN；点位为空时用给定中心合成小圆环
+    let dist = if dist.is_finite() && dist > 10.0 { dist } else { 1_000.0 };
+    let dur = dur.max(60);
+    let pts: Vec<(f64, f64)> = points_bd
+        .iter()
+        .copied()
+        .filter(|(la, lo)| la.is_finite() && lo.is_finite())
+        .collect();
+    let ring_src: Vec<(f64, f64)> = if pts.is_empty() { vec![center] } else { pts };
+    let (dense, arcs, c) = make_point_ring(&ring_src);
+    build_on_ring(&dense, &arcs, c, dist, dur, seed, start_ms, &ring_src)
 }
 
 /// 手绘路线入口：`path_bd` 为用户画的折线（BD-09），`closed` 决定终点是否连回起点。
@@ -64,7 +74,14 @@ pub fn build_on_path(
     start_ms: i64,
     points_bd: &[(f64, f64)],
 ) -> Track {
-    let (dense, arcs, center) = make_path_ring(path_bd, closed);
+    let dist = if dist.is_finite() && dist > 10.0 { dist } else { 1_000.0 };
+    let dur = dur.max(60);
+    let path: Vec<(f64, f64)> = path_bd
+        .iter()
+        .copied()
+        .filter(|(la, lo)| la.is_finite() && lo.is_finite())
+        .collect();
+    let (dense, arcs, center) = make_path_ring(&path, closed);
     // 退化路线（点重合/过短）兜底成打卡点环，避免空路径除零
     if dense.len() < 2 {
         let (dense, arcs, center) = make_point_ring(points_bd);
@@ -449,13 +466,25 @@ fn build_on_ring(
 
     apply_post_fixes(&mut locs, &mut rng, start_ms);
 
-    // 点位吸附：<40m 精确落位
+    // 点位吸附：<40m 精确落位（一对一，且不碰哨兵/异常点）
+    //
+    // 原来每个打卡点各自找最近轨迹点：相距 <40m 的两个打卡点会抢同一个点，
+    // 后一个把前一个覆盖掉（至少一个被判"未经过"）；硬拉 40m 还会在
+    // 相邻点之间造出 45m 的"瞬移"，App 会画成断开。
+    // 这里改成：命中的点独占，位移按 1 / 0.5 / 0.25 摊给相邻点，保持折线连续。
+    let kx = super::geom::met_per_deg_lng(
+        points_bd.iter().map(|p| p.0).sum::<f64>() / points_bd.len().max(1) as f64,
+    );
+    let mut used = vec![false; locs.len()];
     for pl in points_bd {
         let mut best_i = None;
         let mut best_d = 1e18f64;
         for (i, q) in locs.iter().enumerate() {
+            if used[i] || i == 0 || matches!(q.ptype, -1 | 5 | 6) {
+                continue;
+            }
             let dd = ((q.gLat - pl.0) * MET_PER_DEG_LAT).powi(2)
-                + ((q.gLng - pl.1) * MET_PER_DEG_LNG).powi(2);
+                + ((q.gLng - pl.1) * kx).powi(2);
             if dd < best_d {
                 best_d = dd;
                 best_i = Some(i);
@@ -463,18 +492,37 @@ fn build_on_ring(
         }
         if let Some(i) = best_i {
             if best_d < 40.0 * 40.0 {
+                used[i] = true;
+                let d_lat = pl.0 - locs[i].gLat;
+                let d_lng = pl.1 - locs[i].gLng;
                 locs[i].gLat = round_to(pl.0, 7);
                 locs[i].gLng = round_to(pl.1, 7);
+                for (k, w) in [(1usize, 0.5f64), (2usize, 0.25)] {
+                    for j in [i.wrapping_sub(k), i + k] {
+                        if j >= locs.len() || used[j] || matches!(locs[j].ptype, -1 | 5 | 6) {
+                            continue;
+                        }
+                        locs[j].gLat = round_to(locs[j].gLat + d_lat * w, 7);
+                        locs[j].gLng = round_to(locs[j].gLng + d_lng * w, 7);
+                    }
+                }
             }
         }
     }
 
     let total_dis = round_to(dist, 3);
+    // 结尾断崖会给最后一个正常点追加 6~14s（postfix），结束时间必须跟着走：
+    // 否则提交的 stopTime 与末点 gainTime 差几秒，10 秒尾窗还会把末点排除在外
+    let loop_t = round_to(t_acc, 0) as i64;
+    let total_t = locs
+        .last()
+        .map(|p| p.totalTime.max(loop_t))
+        .unwrap_or(loop_t);
     Track {
-        totalTime: round_to(t_acc, 0) as i64,
+        totalTime: total_t,
         totalDistance: total_dis,
         validDistance: total_dis,
-        validTime: round_to(t_acc, 0) as i64,
+        validTime: total_t,
         startTime: start_ms,
         startLatitude: locs[0].gLat,
         startLongitude: locs[0].gLng,

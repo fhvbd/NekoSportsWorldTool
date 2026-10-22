@@ -192,7 +192,7 @@ pub fn run_full_flow(
         route_pts.len()
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
-    let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
+    let start_ms = params.start_ms + ((rand::random::<u64>() % 5) as i64) * 1000;
     // 手绘路线优先：用户画的折线直接当路径，不再走打卡点环/道路路由
     let drawn = params.drawn.clone().filter(|d| d.is_usable());
     if params.drawn.is_some() && drawn.is_none() {
