@@ -528,9 +528,12 @@ impl App {
         // 每帧都 read_to_string + 解析 points_cache.json 太浪费：缓存住，
         // 只在首次绘制或预览过期（点位刷新/锚点变化）时重读
         if !self.run_page.cps_loaded {
-            self.run_page.cps = crate::api::model::load_points_cache_any()
-                .map(|p| crate::api::points::points_bd(&p))
-                .unwrap_or_default();
+            self.run_page.cps = match self.config.custom_points.clone() {
+                Some(custom) if !custom.is_empty() => custom,
+                _ => crate::api::model::load_points_cache_any()
+                    .map(|p| crate::api::points::points_bd(&p))
+                    .unwrap_or_default(),
+            };
             self.run_page.cps_loaded = true;
         }
         let cps = self.run_page.cps.clone();

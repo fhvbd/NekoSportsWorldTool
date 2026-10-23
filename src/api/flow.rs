@@ -108,7 +108,17 @@ pub fn run_full_flow(
     }
 
     // ③ 轨迹生成（必经点 + 打卡点）
-    let pts_bd = points::points_bd(&pts);
+    // 本地修正过的打卡点优先：地图上对齐的位置比接口返回的近似坐标更贴现场
+    let pts_bd = match crate::api::model::load_config().custom_points {
+        Some(custom) if !custom.is_empty() => {
+            log(&format!(
+                "√ [points] 使用本地修正的 {} 个打卡点（模拟位置页保存）",
+                custom.len()
+            ));
+            custom
+        }
+        _ => points::points_bd(&pts),
+    };
     // 必经点保持策略顺序置于前端（waypoints[0] 即起点），剩余打卡点去重后按质心角
     // 排序，使环序自然且不破坏必经点顺序。
     let mut route_pts: Vec<(f64, f64)> = pol.must_points.clone();

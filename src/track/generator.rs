@@ -113,7 +113,7 @@ fn build_on_ring(
     let mut t = 0.0;
     while t < dur_f {
         times.push(t);
-        t += if rng.random() < 0.80 {
+        t += if rng.random() < 0.95 {
             5.0
         } else {
             rng.choice(&[1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0])
@@ -223,9 +223,11 @@ fn build_on_ring(
     let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
     for _ in 0..n {
         let u = rng.random();
-        if u < 0.39 {
+        // type=3 大概是「低精度/网络定位」，占比过高时 App 会把那些段画成灰色：
+        // 真人在操场跑，绝大多数点都是正常 GPS，这里让 type=0 占 ~88%
+        if u < 0.025 {
             kinds.push((3, 1));
-        } else if u < 0.93 {
+        } else if u < 0.990 {
             kinds.push((0, 1));
         } else if u < 0.995 {
             // 异常漂移点：原来 3% 且常有 100~300 m 瞬移，App 画线时会断开成虚线；
@@ -299,10 +301,13 @@ fn build_on_ring(
             );
             // state=3 是「定位质量差」，占比过高时 App 容易把相邻段画成灰色/断开；
             // 真人正常跑步大多数点是好定位，这里把 1/2 的比重调高。
+            // state=1 是「定位正常」。之前 1/2/3 大致各占 1/3，App 里几乎一半的段
+            // 被画成灰色虚线；真人操场跑基本都是 1，这里给 ~90%
+            // 只在极少数点上给"弱定位"，避免 App 把段画成灰色虚线
             state = if typ == 0 {
-                rng.weighted(&[(1, 190), (2, 120), (3, 40)])
+                rng.weighted(&[(1, 990), (2, 5), (3, 5)])
             } else {
-                rng.weighted(&[(1, 180), (2, 160), (3, 60)])
+                rng.weighted(&[(1, 960), (2, 20), (3, 20)])
             };
         } else {
             match lt {

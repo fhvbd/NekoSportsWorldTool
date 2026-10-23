@@ -279,9 +279,9 @@ pub fn build_road(
     let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
     for _ in 0..n {
         let u = rng.random();
-        if u < 0.39 {
+        if u < 0.025 {
             kinds.push((3, 1));
-        } else if u < 0.93 {
+        } else if u < 0.990 {
             kinds.push((0, 1));
         } else if u < 0.995 {
             // 与经典模式一致：异常点 0.5%，且位移限制在十几米内，
@@ -388,9 +388,9 @@ pub fn build_road(
                 2,
             );
             state = if typ == 0 {
-                rng.weighted(&[(1, 145), (2, 45), (3, 164)])
+                rng.weighted(&[(1, 990), (2, 5), (3, 5)])
             } else {
-                rng.weighted(&[(1, 145), (2, 256), (3, 151)])
+                rng.weighted(&[(1, 960), (2, 20), (3, 20)])
             };
         } else {
             match lt {
@@ -452,7 +452,7 @@ pub fn build_road(
             } else {
                 550.0
             };
-            state = rng.weighted(&[(1, 102), (2, 124), (3, 136)]);
+            state = rng.weighted(&[(1, 960), (2, 20), (3, 20)]);
         }
         if typ != -1 {
             dist_acc += d_step;

@@ -80,6 +80,12 @@ pub struct SimLocPage {
     pub campus_lock: bool,
     /// 下次绘制画线画布时要一次性适配到的范围（「操场视图」用）。
     pub route_target: Option<[f64; 4]>,
+    /// 手动修正的打卡点（BD-09，编辑缓冲；空表示沿用服务器点位）。
+    pub custom_points: Vec<(f64, f64)>,
+    /// 正在拖动的打卡点索引。
+    pub drag_point: Option<usize>,
+    /// 打卡点有未保存的修改。
+    pub points_dirty: bool,
 }
 
 impl SimLocPage {
@@ -100,12 +106,29 @@ impl SimLocPage {
         }
         page.campus = cfg.campus_bbox;
         page.campus_lock = cfg.campus_lock;
+        page.custom_points = cfg.custom_points.clone().unwrap_or_default();
         page
+    }
+
+    /// 地图与环计算实际使用的打卡点：本地修正过就用修正值。
+    pub fn effective_points(&self) -> Vec<(f64, f64)> {
+        if self.custom_points.is_empty() {
+            self.points.clone()
+        } else {
+            self.custom_points.clone()
+        }
+    }
+
+    /// 第一次编辑时把服务器点位拷进编辑缓冲。
+    pub fn begin_point_edit(&mut self) {
+        if self.custom_points.is_empty() {
+            self.custom_points = self.points.clone();
+        }
     }
 
     /// 按已缓存打卡点重算校园范围（外扩 150 m），没有缓存时退回用模拟位置附近。
     pub fn recompute_campus(&mut self, margin_m: f64) -> bool {
-        let mut pts = self.points.clone();
+        let mut pts = self.effective_points();
         if pts.is_empty() {
             if let Some(p) = self.bd() {
                 pts.push(p);
@@ -437,7 +460,7 @@ impl App {
             }
         }
         // ── 校园范围（只显示学校这一块）──────────────────────────
-        if page.campus.is_none() && !page.points.is_empty() {
+        if page.campus.is_none() && !page.effective_points().is_empty() {
             if page.recompute_campus(CAMPUS_MARGIN_M) {
                 self.config.campus_bbox = page.campus;
                 let _ = crate::api::model::save_config(&self.config);
@@ -493,7 +516,7 @@ impl App {
             if page.points.is_empty() {
                 page.flash("没有打卡点缓存，先点「重新读取点位」", true);
             } else {
-                page.route_target = crate::location::bbox_from_points(&page.points, 60.0);
+                page.route_target = crate::location::bbox_from_points(&page.effective_points(), 60.0);
                 page.route_map_ready = false;
                 page.route_fit_size = None;
                 page.mode = MapMode::Draw;
@@ -552,10 +575,57 @@ impl App {
                 ui.colored_label(
                     theme::text_dim(),
                     format!(
-                        "黄点为已缓存的打卡点（{} 个）。单击地图把模拟位置移到该处；拖拽平移、滚轮缩放。",
-                        page.points.len()
+                        "黄点为打卡点（{} 个）：拖动黄点可修正位置、右键删除。单击空白处取点/平移/滚轮缩放。",
+                        page.effective_points().len()
                     ),
                 );
+                let mut add_cp = false;
+                let mut save_cps = false;
+                let mut restore_cps = false;
+                mobile::row(ui, |ui| {
+                    ui.label("打卡点：");
+                    if ui
+                        .small_button("加点")
+                        .on_hover_text("在地图中心加一个打卡点")
+                        .clicked()
+                    {
+                        add_cp = true;
+                    }
+                    if ui.small_button("保存点位").clicked() {
+                        save_cps = true;
+                    }
+                    if ui
+                        .small_button("恢复服务器点位")
+                        .on_hover_text("丢弃本地修正，回到接口返回的打卡点")
+                        .clicked()
+                    {
+                        restore_cps = true;
+                    }
+                    if page.points_dirty {
+                        ui.colored_label(theme::warn(), "（有未保存修改）");
+                    }
+                });
+                if add_cp {
+                    page.begin_point_edit();
+                    let (lat, lon) = page.map.center;
+                    page.custom_points.push((lat, lon));
+                    page.points_dirty = true;
+                    page.flash("已在视野中心加一个打卡点（拖到实际位置后保存）", false);
+                }
+                if save_cps {
+                    self.save_custom_points(page);
+                }
+                if restore_cps {
+                    page.custom_points.clear();
+                    page.points_dirty = false;
+                    self.config.custom_points = None;
+                    let _ = crate::api::model::save_config(&self.config);
+                    page.campus = None;
+                    page.map_ready = false;
+                    page.route_map_ready = false;
+                    self.run_page.cps_loaded = false;
+                    page.flash("已恢复为服务器点位", false);
+                }
                 self.draw_pick_map(ui, page);
             }
             MapMode::Draw => {
@@ -856,9 +926,48 @@ impl App {
         page.tiles.draw(ui, &page.map, canvas, clip);
 
         let checkpoint = egui::Color32::from_rgb(240, 180, 0);
-        for &(lat, lon) in &page.points {
+        let shown = page.effective_points();
+        for &(lat, lon) in &shown {
             page.map
-                .draw_point(&painter, canvas, lat, lon, checkpoint, 3.0);
+                .draw_point(&painter, canvas, lat, lon, checkpoint, 3.5);
+        }
+        // 拖动 = 修正打卡点位置（右键删除），单击仍然是取点
+        if response.drag_started() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                page.drag_point = nearest_cp(&shown, canvas, &page.map, pos);
+                if page.drag_point.is_some() {
+                    page.begin_point_edit();
+                }
+            }
+        }
+        if let Some(i) = page.drag_point {
+            if response.dragged() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (bd_lat, bd_lon) = page.map.from_screen(canvas, pos);
+                    if (-90.0..=90.0).contains(&bd_lat) && (-180.0..=180.0).contains(&bd_lon) {
+                        if let Some(pt) = page.custom_points.get_mut(i) {
+                            pt.0 = bd_lat;
+                            pt.1 = bd_lon;
+                            page.points_dirty = true;
+                        }
+                    }
+                }
+            }
+            if response.drag_stopped() {
+                page.drag_point = None;
+            }
+        }
+        if response.secondary_clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some(i) = nearest_cp(&shown, canvas, &page.map, pos) {
+                    page.begin_point_edit();
+                    if i < page.custom_points.len() {
+                        page.custom_points.remove(i);
+                        page.points_dirty = true;
+                        page.flash("已删除该打卡点（记得「保存点位」）", false);
+                    }
+                }
+            }
         }
         if let Some((lat, lon)) = pin {
             page.map
@@ -897,7 +1006,7 @@ impl App {
             egui::FontId::proportional(12.0),
             egui::Color32::from_rgb(88, 104, 99),
         );
-        if page.points.is_empty() {
+        if shown.is_empty() {
             painter.text(
                 canvas.center(),
                 egui::Align2::CENTER_CENTER,
@@ -1144,10 +1253,33 @@ impl App {
         );
     }
 
+    /// 保存手动修正的打卡点：写入 config 并让预览重新读点位。
+    fn save_custom_points(&mut self, page: &mut SimLocPage) {
+        self.config.custom_points = if page.custom_points.is_empty() {
+            None
+        } else {
+            Some(page.custom_points.clone())
+        };
+        match crate::api::model::save_config(&self.config) {
+            Ok(()) => {
+                page.points_dirty = false;
+                page.campus = None;
+                page.map_ready = false;
+                page.route_map_ready = false;
+                self.run_page.cps_loaded = false;
+                self.invalidate_run_preview();
+                let n = page.custom_points.len();
+                page.flash(format!("√ 已保存 {n} 个打卡点，跑步将按这些点位生成路线"), false);
+                self.log.push(&format!("√  本地打卡点已保存（{n} 个）"));
+            }
+            Err(e) => page.flash(format!("保存失败：{e}"), true),
+        }
+    }
+
     /// 画线工具栏：统计、编辑、保存。
     fn draw_route_toolbar(&mut self, ui: &mut egui::Ui, page: &mut SimLocPage) {
         ui.add_space(4.0);
-        let gaps = page.route.checkpoint_gaps(&page.points);
+        let gaps = page.route.checkpoint_gaps(&page.effective_points());
         let missed = gaps.iter().filter(|g| **g > CHECKPOINT_TOL_M).count();
         if page.points.is_empty() {
             ui.colored_label(
@@ -1256,7 +1388,7 @@ impl App {
         }
         if attach {
             page.push_undo();
-            let n = page.route.attach_checkpoints(&page.points, CHECKPOINT_TOL_M);
+            let n = page.route.attach_checkpoints(&page.effective_points(), CHECKPOINT_TOL_M);
             page.route_note = if n == 0 {
                 "路线已经串上全部打卡点".into()
             } else {
@@ -1308,6 +1440,24 @@ impl App {
             }
         }
     }
+}
+
+/// 屏幕坐标命中的打卡点索引（12 px 内）。
+fn nearest_cp(
+    pts: &[(f64, f64)],
+    canvas: egui::Rect,
+    map: &MapState,
+    pos: egui::Pos2,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, &(lat, lon)) in pts.iter().enumerate() {
+        let p = map.to_screen(canvas, lat, lon);
+        let d = p.distance(pos);
+        if d <= 12.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// 锁定校园时，底图只铺在这个屏幕矩形里（校园框 ∩ 画布）。

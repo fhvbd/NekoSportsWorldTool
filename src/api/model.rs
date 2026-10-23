@@ -104,6 +104,12 @@ pub struct Config {
     /// 是否把地图视野锁定在 [`Config::campus_bbox`] 内。
     #[serde(default = "default_true")]
     pub campus_lock: bool,
+    /// 用户在「模拟位置」页手动修正过的打卡点（BD-09）。
+    ///
+    /// `Some` 且非空时优先于服务器返回的点位——地图上对齐过的位置比接口
+    /// 返回的近似坐标更贴现场。
+    #[serde(default)]
+    pub custom_points: Option<Vec<(f64, f64)>>,
 }
 
 fn default_true() -> bool {
@@ -178,6 +184,7 @@ impl Default for Config {
             tile_datum: default_tile_datum(),
             campus_bbox: None,
             campus_lock: true,
+            custom_points: None,
         }
     }
 }
