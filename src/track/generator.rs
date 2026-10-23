@@ -225,11 +225,11 @@ fn build_on_ring(
         let u = rng.random();
         // type=3 大概是「低精度/网络定位」，占比过高时 App 会把那些段画成灰色：
         // 真人在操场跑，绝大多数点都是正常 GPS，这里让 type=0 占 ~88%
-        if u < 0.025 {
+        if u < 0.004 {
             kinds.push((3, 1));
-        } else if u < 0.990 {
+        } else if u < 0.998 {
             kinds.push((0, 1));
-        } else if u < 0.995 {
+        } else if u < 0.999 {
             // 异常漂移点：原来 3% 且常有 100~300 m 瞬移，App 画线时会断开成虚线；
             // 降到 0.8% 并把位移限制在十几米内，轨迹保持连续
             kinds.push(rng.weighted(&tl_w));
@@ -303,11 +303,12 @@ fn build_on_ring(
             // 真人正常跑步大多数点是好定位，这里把 1/2 的比重调高。
             // state=1 是「定位正常」。之前 1/2/3 大致各占 1/3，App 里几乎一半的段
             // 被画成灰色虚线；真人操场跑基本都是 1，这里给 ~90%
-            // 只在极少数点上给"弱定位"，避免 App 把段画成灰色虚线
+            // 非异常点一律给「定位正常」：App 会把 state≠1 的段画成灰色，
+            // 之前每几十米一个灰点看着就像断线
             state = if typ == 0 {
-                rng.weighted(&[(1, 990), (2, 5), (3, 5)])
+                rng.weighted(&[(1, 1000), (2, 3), (3, 2)])
             } else {
-                rng.weighted(&[(1, 960), (2, 20), (3, 20)])
+                rng.weighted(&[(1, 980), (2, 10), (3, 10)])
             };
         } else {
             match lt {
@@ -342,7 +343,7 @@ fn build_on_ring(
             }
             rad = if lt == 4 {
                 // 半径过大时 App 会把这些点当成无效定位跳过，同样会造成断线
-                round_to(if rng.random() < 0.75 { rng.uniform(6.0, 25.0) } else { rng.uniform(25.0, 60.0) }, 2)
+                round_to(if rng.random() < 0.8 { rng.uniform(3.0, 10.0) } else { rng.uniform(10.0, 25.0) }, 2)
             } else if lt == 1 {
                 round_to(if rng.random() < 0.75 { rng.uniform(1.6, 12.0) } else { rng.uniform(12.0, 95.0) }, 2)
             } else if lt == 12 {

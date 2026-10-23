@@ -49,10 +49,13 @@ pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64) {
         e.locType = 1;
         e.radius = round_to(rng.uniform(1.5, 3.0), 2);
         // 后半段散布 type=1/2/8（67-99% 行程区间；type=8 真人低频出现）
+        //
+        // 原来每条轨迹撒 6%，App 会把 type=1/2 的段画成灰色，后 1/3 就会
+        // "隔一段一个灰点"。降到 0.8% 并偏向 type=1。
         let from = (locs.len() as f64 * 0.67) as usize;
         for i in from..locs.len().saturating_sub(2) {
-            if rng.random() < 0.06 {
-                locs[i].ptype = rng.choice(&[1, 1, 2, 8]);
+            if rng.random() < 0.008 {
+                locs[i].ptype = rng.choice(&[1, 1, 1, 2, 8]);
                 locs[i].locType = 1;
             }
         }
