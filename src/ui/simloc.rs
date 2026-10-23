@@ -412,6 +412,10 @@ impl App {
                     theme::text_dim(),
                     format!("已加载 {loaded} · 加载中 {inflight} · 失败 {failed}"),
                 );
+                // 有失败时给个手动重试：网络刚恢复（DNS 才通）时不用重启程序
+                if failed > 0 && ui.small_button("重试底图").clicked() {
+                    page.tiles.reset();
+                }
             });
             if let Some(note) = page.tiles.note.clone() {
                 ui.colored_label(theme::warn(), format!("底图异常：{note}"));

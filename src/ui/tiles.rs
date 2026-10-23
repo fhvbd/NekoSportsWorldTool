@@ -82,9 +82,27 @@ pub fn attribution(url: &str) -> &'static str {
     }
 }
 
-/// 失败记录 + 计数（失败多了会重试，见 [`TileLayer::request`]）。
-fn mark_failed_inner(failed: &mut std::collections::HashSet<Key>, key: Key) {
-    failed.insert(key);
+/// 失败的瓦片：`key -> (上次失败时间, 连续失败次数)`。
+///
+/// 原来一次失败就永久拉黑：网络在启动瞬间没通（DNS 没起来、VPN 还没连上），
+/// 整屏瓦片就会"已加载 0 · 失败 15"，之后网络恢复了也永远不重试。
+type FailedAt = std::collections::HashMap<Key, (std::time::Instant, u8)>;
+
+fn mark_failed_inner(failed: &mut FailedAt, key: Key) {
+    let entry = failed
+        .entry(key)
+        .or_insert((std::time::Instant::now(), 0));
+    entry.0 = std::time::Instant::now();
+    entry.1 = entry.1.saturating_add(1);
+}
+
+/// 失败后的冷却时间：连续失败越多等得越久（最长 60 s）。
+fn retry_cooldown(tries: u8) -> std::time::Duration {
+    match tries {
+        0 | 1 => std::time::Duration::from_secs(10),
+        2 => std::time::Duration::from_secs(25),
+        _ => std::time::Duration::from_secs(60),
+    }
 }
 
 /// 当前模板对应哪个预设（用于下拉框回显）。
@@ -115,8 +133,7 @@ pub struct TileLayer {
     pub note: Option<String>,
     tiles: HashMap<Key, Tile>,
     inflight: HashSet<Key>,
-    failed: HashSet<Key>,
-    requested: usize,
+    failed: FailedAt,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
@@ -143,8 +160,7 @@ impl TileLayer {
             note: None,
             tiles: HashMap::new(),
             inflight: HashSet::new(),
-            failed: HashSet::new(),
-            requested: 0,
+            failed: FailedAt::new(),
             tx,
             rx,
         }
@@ -155,7 +171,6 @@ impl TileLayer {
         self.tiles.clear();
         self.inflight.clear();
         self.failed.clear();
-        self.requested = 0;
         self.note = None;
     }
 
@@ -174,6 +189,12 @@ impl TileLayer {
         }
         self.drain(ui.ctx());
         let visible = self.visible(map, rect);
+        // 缓存上限：只淘汰视野外的旧瓦片（整屏清空会闪一下）
+        if self.tiles.len() > MAX_TILES_TOTAL * 2 {
+            let keep: HashSet<Key> = visible.iter().map(|(k, _)| *k).collect();
+            self.tiles.retain(|k, _| keep.contains(k));
+            self.failed.retain(|k, _| keep.contains(k));
+        }
         if visible.is_empty() {
             self.note.get_or_insert_with(|| "视野超出可用瓦片范围".into());
             return false;
@@ -300,10 +321,17 @@ impl TileLayer {
     }
 
     fn request(&mut self, key: Key) {
-        if self.inflight.contains(&key) || self.failed.contains(&key) {
+        if self.inflight.contains(&key) {
             return;
         }
-        if self.inflight.len() >= MAX_INFLIGHT || self.requested >= MAX_TILES_TOTAL {
+        if let Some((when, tries)) = self.failed.get(&key).copied() {
+            if when.elapsed() < retry_cooldown(tries) {
+                return;
+            }
+            // 冷却结束就重试：网络恢复后地图能自己长回来
+            self.failed.remove(&key);
+        }
+        if self.inflight.len() >= MAX_INFLIGHT {
             return;
         }
         // 支持 {1-4} 这类子域占位（高德瓦片），按 tile 坐标轮转取一个，避免撞同一个域名
@@ -315,7 +343,6 @@ impl TileLayer {
             .replace("{x}", &key.x.to_string())
             .replace("{y}", &key.y.to_string());
         self.inflight.insert(key);
-        self.requested += 1;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let agent = crate::api::client::make_agent();
@@ -360,10 +387,7 @@ impl TileLayer {
                 }
             }
         }
-        // 缓存上限：超过就整体清空（纹理句柄随 HashMap 释放）
-        if self.tiles.len() > MAX_TILES_TOTAL * 2 {
-            self.tiles.clear();
-        }
+        // 缓存上限统一在 draw 里按视野淘汰（见 TileLayer::draw）
     }
 }
 
